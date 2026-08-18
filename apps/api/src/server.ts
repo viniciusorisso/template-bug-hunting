@@ -1,4 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import {
@@ -11,8 +13,10 @@ import {
   projectResolvedSource,
   validateSubmission,
   type AdminAuthRequest,
-  type ChallengeStateResponse,
+  type AdminCredentials,
   type AdminStatusResponse,
+  type AdminStoreSnapshot,
+  type ChallengeStateResponse,
   type CodeRange,
   type CreateRoomRequest,
   type JoinRoomRequest,
@@ -20,6 +24,8 @@ import {
   type ResolvedBugEvent,
   type RoomActivityEvent,
   type RoomActivityResponse,
+  type RoomStoreSnapshot,
+  type SessionProgress,
   type SubmitBugRequest
 } from "@ts-bug-hunt/core";
 
@@ -29,17 +35,36 @@ type StreamClient = {
   response: http.ServerResponse;
 };
 
+type PersistedApiState = {
+  version: 1;
+  admin?: AdminStoreSnapshot;
+  rooms: RoomStoreSnapshot;
+  sessions: SessionProgress[];
+  challengeResolvedBugOrder: Record<string, string[]>;
+};
+
+type CreateServerOptions = {
+  store?: InMemorySessionStore;
+  adminStore?: InMemoryAdminStore;
+  roomStore?: InMemoryRoomStore;
+  stateFilePath?: string;
+};
 
 const ADMIN_TOKEN = "admin-session-token";
-const DEFAULT_CHALLENGE_ID = "checkout-ts-bug-hunt";
+const ADMIN_USERNAME_ENV = "TS_BUG_HUNT_ADMIN_USERNAME";
+const ADMIN_PASSWORD_ENV = "TS_BUG_HUNT_ADMIN_PASSWORD";
+const ADMIN_PASSWORD_HASH_ENV = "TS_BUG_HUNT_ADMIN_PASSWORD_HASH";
 
-export function createServer(
-  store = new InMemorySessionStore(),
-  adminStore = new InMemoryAdminStore(),
-  roomStore = new InMemoryRoomStore()
-): http.Server {
+export function createServer(options: CreateServerOptions = {}): http.Server {
+  const persistedState = options.stateFilePath ? loadPersistedState(options.stateFilePath) : null;
+  const store = options.store ?? new InMemorySessionStore(persistedState?.sessions ?? []);
+  const adminStore = options.adminStore ?? new InMemoryAdminStore(resolveAdminCredentials());
+  const roomStore = options.roomStore ?? new InMemoryRoomStore(persistedState?.rooms ?? {});
   const streamClients = new Set<StreamClient>();
-  const challengeResolvedBugOrder = new Map<string, string[]>();
+  const challengeResolvedBugOrder = new Map<string, string[]>(
+    Object.entries(persistedState?.challengeResolvedBugOrder ?? {})
+  );
+  const persistState = createStatePersister(options.stateFilePath, store, adminStore, roomStore, challengeResolvedBugOrder);
 
   return http.createServer(async (request, response) => {
     setCorsHeaders(response);
@@ -88,7 +113,8 @@ export function createServer(
 
     if (request.method === "GET" && request.url === "/api/admin/status") {
       const payload: AdminStatusResponse = {
-        requiresBootstrap: !adminStore.isConfigured()
+        configured: adminStore.isConfigured(),
+        username: adminStore.getUsername()
       };
 
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -96,34 +122,22 @@ export function createServer(
       return;
     }
 
-    if (request.method === "POST" && request.url === "/api/admin/bootstrap") {
-      const payload = await readJson<AdminAuthRequest>(request);
-
-      if (!payload?.password?.trim()) {
-        return sendJson(response, 400, { message: "password e obrigatoria." });
-      }
-
-      const configured = adminStore.configure(hashSecret(payload.password.trim()));
-
-      if (!configured) {
-        return sendJson(response, 409, { message: "Bootstrap do admin ja foi concluido." });
-      }
-
-      return sendJson(response, 200, { token: ADMIN_TOKEN, username: "admin" });
-    }
-
     if (request.method === "POST" && request.url === "/api/admin/login") {
+      if (!adminStore.isConfigured()) {
+        return sendJson(response, 503, { message: "Credenciais admin nao configuradas no servidor." });
+      }
+
       const payload = await readJson<AdminAuthRequest>(request);
 
-      if (payload?.username !== "admin" || !payload.password?.trim()) {
+      if (!payload?.username?.trim() || !payload.password?.trim()) {
         return sendJson(response, 400, { message: "username e password sao obrigatorios." });
       }
 
-      if (!adminStore.authenticate(hashSecret(payload.password.trim()))) {
+      if (!adminStore.authenticate(payload.username.trim(), hashSecret(payload.password.trim()))) {
         return sendJson(response, 401, { message: "Credenciais invalidas." });
       }
 
-      return sendJson(response, 200, { token: ADMIN_TOKEN, username: "admin" });
+      return sendJson(response, 200, { token: ADMIN_TOKEN, username: payload.username.trim() });
     }
 
     if (request.method === "GET" && request.url === "/api/admin/rooms") {
@@ -149,14 +163,22 @@ export function createServer(
         return sendJson(response, 400, { message: "password e obrigatoria." });
       }
 
+      const challenge = getChallengeById(payload.challengeId?.trim() ?? "");
+
+      if (!challenge) {
+        return sendJson(response, 400, { message: "challengeId invalido." });
+      }
+
       const room = roomStore.createRoom({
         id: randomUUID(),
         name: payload.name.trim(),
         passwordHash: hashSecret(payload.password.trim()),
         roomCode: createRoomCode(roomStore),
+        challengeId: challenge.id,
         createdAt: new Date().toISOString()
       });
 
+      persistState();
       return sendJson(response, 201, roomStore.getRoomSummary(room.roomCode));
     }
 
@@ -172,6 +194,7 @@ export function createServer(
         return sendJson(response, 404, { message: "Sala nao encontrada." });
       }
 
+      persistState();
       response.writeHead(204);
       response.end();
       return;
@@ -212,14 +235,22 @@ export function createServer(
         return sendJson(response, 404, { message: "Sala nao encontrada ou inativa." });
       }
 
+      const challenge = getChallengeById(room.challengeId);
+
+      if (!challenge) {
+        return sendJson(response, 500, { message: "Challenge configurado na sala nao foi encontrado." });
+      }
+
       const joinResponse: JoinRoomResponse = {
         participantSessionId: participant.id,
         roomCode: participant.roomCode,
         roomName: room.name,
         displayName: participant.displayName,
-        challengeId: DEFAULT_CHALLENGE_ID
+        challengeId: challenge.id,
+        challengeTitle: challenge.title
       };
 
+      persistState();
       return sendJson(response, 200, joinResponse);
     }
 
@@ -282,7 +313,14 @@ export function createServer(
         return sendJson(response, 400, { message: "sessionId e challengeId sao obrigatorios." });
       }
 
-      return sendJson(response, 200, store.getOrCreate(sessionId, challengeId));
+      const existing = store.get(sessionId, challengeId);
+      const progress = store.getOrCreate(sessionId, challengeId);
+
+      if (!existing) {
+        persistState();
+      }
+
+      return sendJson(response, 200, progress);
     }
 
     if (request.method === "DELETE" && request.url?.startsWith("/api/session-progress/")) {
@@ -297,6 +335,7 @@ export function createServer(
       }
 
       store.delete(sessionId, challengeId);
+      persistState();
       response.writeHead(204);
       response.end();
       return;
@@ -317,7 +356,7 @@ export function createServer(
 
       const currentProgress = store.getOrCreate(payload.sessionId, payload.challengeId);
       const baseResult = validateSubmission(payload, currentProgress);
-      const resolvedBugOrder = syncChallengeResolvedBugOrder(challengeResolvedBugOrder, payload.challengeId, baseResult.bugId, baseResult.status);
+      syncChallengeResolvedBugOrder(challengeResolvedBugOrder, payload.challengeId, baseResult.bugId, baseResult.status);
       const challengeState = buildChallengeStateResponse(payload.challengeId, challengeResolvedBugOrder);
       const enrichedResult = {
         ...baseResult,
@@ -344,6 +383,8 @@ export function createServer(
         });
       }
 
+      persistState();
+
       if (enrichedResult.status === "solved") {
         const event = buildResolvedBugEvent(payload, enrichedResult, challengeState);
 
@@ -363,10 +404,12 @@ const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(proces
 
 if (isMainModule) {
   const port = Number(process.env.PORT ?? 3001);
-  const server = createServer();
+  const stateFilePath = process.env.TS_BUG_HUNT_STATE_FILE?.trim() || path.resolve(process.cwd(), ".data/ts-bug-hunt-state.json");
+  const server = createServer({ stateFilePath });
 
   server.listen(port, () => {
     console.log(`API listening on http://localhost:${port}`);
+    console.log(`State persistence file: ${stateFilePath}`);
   });
 }
 
@@ -410,6 +453,10 @@ function validateRequest(payload: SubmitBugRequest | null, roomStore: InMemoryRo
 
     if (!room || room.status !== "active") {
       return "roomCode invalido.";
+    }
+
+    if (room.challengeId !== payload.challengeId) {
+      return "challengeId nao corresponde a sala informada.";
     }
 
     if (!payload.participantName?.trim()) {
@@ -579,4 +626,79 @@ function createRoomCode(roomStore: InMemoryRoomStore): string {
 
 function hashSecret(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
+}
+
+function resolveAdminCredentials(): AdminCredentials | null {
+  const username = process.env[ADMIN_USERNAME_ENV]?.trim();
+  const passwordHash = process.env[ADMIN_PASSWORD_HASH_ENV]?.trim();
+  const password = process.env[ADMIN_PASSWORD_ENV]?.trim();
+
+  if (!username) {
+    return null;
+  }
+
+  if (passwordHash) {
+    return { username, passwordHash };
+  }
+
+  if (password) {
+    return { username, passwordHash: hashSecret(password) };
+  }
+
+  return null;
+}
+
+function createStatePersister(
+  stateFilePath: string | undefined,
+  store: InMemorySessionStore,
+  _adminStore: InMemoryAdminStore,
+  roomStore: InMemoryRoomStore,
+  challengeResolvedBugOrder: Map<string, string[]>
+): () => void {
+  if (!stateFilePath) {
+    return () => {};
+  }
+
+  return () => {
+    const payload: PersistedApiState = {
+      version: 1,
+      rooms: roomStore.snapshot(),
+      sessions: store.list(),
+      challengeResolvedBugOrder: Object.fromEntries(challengeResolvedBugOrder.entries())
+    };
+
+    mkdirSync(path.dirname(stateFilePath), { recursive: true });
+    writeFileSync(stateFilePath, JSON.stringify(payload, null, 2), "utf8");
+  };
+}
+
+function loadPersistedState(stateFilePath: string): PersistedApiState | null {
+  if (!existsSync(stateFilePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(stateFilePath, "utf8")) as Partial<PersistedApiState> | null;
+
+    if (!parsed || parsed.version !== 1) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      rooms: {
+        rooms: parsed.rooms?.rooms ?? [],
+        participants: parsed.rooms?.participants ?? [],
+        activity: parsed.rooms?.activity ?? {}
+      },
+      sessions: parsed.sessions ?? [],
+      challengeResolvedBugOrder: parsed.challengeResolvedBugOrder ?? {}
+    };
+  } catch (error) {
+    console.warn(
+      `Nao foi possivel carregar o estado persistido em ${stateFilePath}. Um novo estado em memoria sera criado.`,
+      error
+    );
+    return null;
+  }
 }

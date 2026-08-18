@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type {
   AdminAuthResponse,
   AdminStatusResponse,
@@ -21,7 +21,7 @@ import SubmissionModal from "./components/SubmissionModal.vue";
 import { BrowserBannerResolvedBugNotifier, type NotificationBanner } from "./lib/browserNotifier";
 import { getOrCreateSessionId } from "./lib/session";
 
-type ViewMode = "challenge" | "admin" | "join" | "observer";
+type ViewMode = "home" | "challenge" | "admin" | "join" | "observer";
 
 type RouteState = {
   view: ViewMode;
@@ -29,12 +29,32 @@ type RouteState = {
   search: string;
 };
 
+type ParsedRoomContext = {
+  roomCode: string;
+  roomName: string;
+  participantId: string;
+  participantName: string;
+  challengeId: string;
+  sessionId: string;
+};
+
+type CelebrationBalloonState = {
+  id: string;
+  bugId: string;
+  title: string;
+  shortDescription: string;
+  diff: ResolvedBugDiff;
+  createdAt: string;
+  expiresAt: string;
+};
+
 const defaultApiBaseUrl = import.meta.env.DEV ? "http://localhost:3001" : "";
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl).replace(/\/$/, "");
-const challengeId = "checkout-ts-bug-hunt";
 const adminTokenStorageKey = "ts-bug-hunt.admin-token";
+const celebrationDurationMs = 4000;
 
 const route = ref<RouteState>(readRoute());
+const availableChallenges = ref<ChallengeDefinition[]>([]);
 
 const challenge = ref<ChallengeDefinition | null>(null);
 const loading = ref(true);
@@ -54,6 +74,12 @@ const selectedRange = ref<CodeRange | null>(null);
 const selectedText = ref("");
 const modalOpen = ref(false);
 const notification = ref<NotificationBanner | null>(null);
+const activeBalloons = ref<CelebrationBalloonState[]>([]);
+const selectedResolvedBug = ref<CelebrationBalloonState | null>(null);
+const highlightedBugId = ref<string | null>(null);
+const latestResolvedBug = ref<ResolvedBugEvent | null>(null);
+const resolvedBugHistory = ref<ResolvedBugEvent[]>([]);
+const selectedResolvedHistoryBugId = ref<string | null>(null);
 
 const form = reactive({
   proposedFix: ""
@@ -62,11 +88,13 @@ const form = reactive({
 const adminState = reactive({
   loading: false,
   error: "",
-  requiresBootstrap: true,
+  configured: true,
   token: typeof window !== "undefined" ? window.localStorage.getItem(adminTokenStorageKey) ?? "" : "",
+  username: "",
   password: "",
   roomName: "",
   roomPassword: "",
+  challengeId: "",
   rooms: [] as RoomSummary[]
 });
 
@@ -94,7 +122,6 @@ const recentAttempts = computed(() => [...(sessionProgress.value?.attempts ?? []
 
 const displayedSource = computed(() => challengeDisplayState.displayedSource || challenge.value?.source || "");
 
-
 const solvedBugs = computed(() => {
   if (!challenge.value || !sessionProgress.value) {
     return [];
@@ -102,6 +129,18 @@ const solvedBugs = computed(() => {
 
   const solvedIds = new Set(sessionProgress.value.solvedBugIds);
   return challenge.value.bugs.filter((bug) => solvedIds.has(bug.id));
+});
+
+const selectedResolvedHistoryEntry = computed(() => {
+  if (resolvedBugHistory.value.length == 0) {
+    return null;
+  }
+
+  if (!selectedResolvedHistoryBugId.value) {
+    return resolvedBugHistory.value[0] ?? null;
+  }
+
+  return resolvedBugHistory.value.find((event) => event.bugId === selectedResolvedHistoryBugId.value) ?? resolvedBugHistory.value[0] ?? null;
 });
 
 const selectedRangeLabel = computed(() => {
@@ -113,27 +152,38 @@ const selectedRangeLabel = computed(() => {
   return `L${startLine}:C${startColumn} ate L${endLine}:C${endColumn}`;
 });
 
-const roomContext = computed(() => {
-  const params = new URLSearchParams(route.value.search);
+function parseRoomContext(search: string): ParsedRoomContext {
+  const params = new URLSearchParams(search);
   const roomCode = params.get("roomCode")?.trim().toUpperCase() ?? "";
   const participantId = params.get("participantId")?.trim() ?? params.get("participantSessionId")?.trim() ?? "";
   const participantName = params.get("participantName")?.trim() ?? "";
   const roomName = params.get("roomName")?.trim() ?? "";
+  const challengeId = params.get("challengeId")?.trim() ?? "";
 
   return {
     roomCode,
     roomName,
     participantId,
     participantName,
+    challengeId,
     sessionId: participantId || getOrCreateSessionId()
   };
-});
+}
+
+const roomContext = computed(() => parseRoomContext(route.value.search));
+const currentChallengeId = computed(() => roomContext.value.challengeId);
+const hasRoomAccess = computed(() => Boolean(roomContext.value.roomCode && roomContext.value.participantId && currentChallengeId.value));
+const currentChallengeSummary = computed(() => availableChallenges.value.find((item) => item.id === currentChallengeId.value) ?? challenge.value);
 
 const notifier = new BrowserBannerResolvedBugNotifier((banner) => {
   notification.value = banner;
 });
 
 let eventSource: EventSource | null = null;
+const balloonTimeouts = new Map<string, number>();
+let highlightedBugTimeoutId: number | null = null;
+const resolvedBugModalRef = ref<HTMLElement | null>(null);
+let previousResolvedBugTrigger: HTMLElement | null = null;
 
 onMounted(async () => {
   window.addEventListener("keydown", handleWindowKeydown);
@@ -145,6 +195,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("popstate", handlePopState);
   closeEventSource();
+  clearCelebrationTimers();
 });
 
 function handlePopState(): void {
@@ -154,6 +205,11 @@ function handlePopState(): void {
 
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") {
+    return;
+  }
+
+  if (selectedResolvedBug.value) {
+    closeResolvedBugModal();
     return;
   }
 
@@ -168,7 +224,16 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 async function initializeCurrentView(): Promise<void> {
   closeEventSource();
 
+  if (route.value.view === "home") {
+    await loadChallengeCatalog();
+    return;
+  }
+
   if (route.value.view === "challenge") {
+    if (!hasRoomAccess.value) {
+      return;
+    }
+
     await loadChallengeState();
     connectChallengeStream();
     return;
@@ -207,7 +272,13 @@ function readRoute(): RouteState {
     };
   }
 
-  return { view: "challenge", search: window.location.search };
+  const roomContext = parseRoomContext(window.location.search);
+
+  if (roomContext.roomCode && roomContext.participantId && roomContext.challengeId) {
+    return { view: "challenge", search: window.location.search };
+  }
+
+  return { view: "home", search: window.location.search };
 }
 
 function navigate(path: string): void {
@@ -247,6 +318,177 @@ function closeSubmissionModal(): void {
   submissionError.value = "";
 }
 
+function dismissBalloon(balloonId: string): void {
+  const timeoutId = balloonTimeouts.get(balloonId);
+
+  if (timeoutId !== undefined) {
+    window.clearTimeout(timeoutId);
+    balloonTimeouts.delete(balloonId);
+  }
+
+  activeBalloons.value = activeBalloons.value.filter((balloon) => balloon.id !== balloonId);
+}
+
+function scheduleBalloonDismiss(balloonId: string, delayMs = celebrationDurationMs): void {
+  const existingTimeoutId = balloonTimeouts.get(balloonId);
+
+  if (existingTimeoutId !== undefined) {
+    window.clearTimeout(existingTimeoutId);
+  }
+
+  balloonTimeouts.set(
+    balloonId,
+    window.setTimeout(() => {
+      dismissBalloon(balloonId);
+    }, delayMs)
+  );
+}
+
+function queueResolvedBugCelebration(event: ResolvedBugEvent): void {
+  const balloonId = `${event.bugId}:${event.resolvedAt}`;
+  const nextBalloon: CelebrationBalloonState = {
+    id: balloonId,
+    bugId: event.bugId,
+    title: event.title,
+    shortDescription: event.shortDescription,
+    diff: event.diff,
+    createdAt: event.resolvedAt,
+    expiresAt: new Date(new Date(event.resolvedAt).getTime() + celebrationDurationMs).toISOString()
+  };
+
+  dismissBalloon(balloonId);
+  activeBalloons.value = [...activeBalloons.value.filter((balloon) => balloon.bugId !== event.bugId), nextBalloon];
+  scheduleBalloonDismiss(balloonId);
+}
+
+async function openResolvedBugModal(balloonId: string): Promise<void> {
+  const balloon = activeBalloons.value.find((candidate) => candidate.id === balloonId);
+
+  if (!balloon) {
+    return;
+  }
+
+  previousResolvedBugTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  const timeoutId = balloonTimeouts.get(balloonId);
+
+  if (timeoutId !== undefined) {
+    window.clearTimeout(timeoutId);
+    balloonTimeouts.delete(balloonId);
+  }
+
+  selectedResolvedBug.value = balloon;
+  await nextTick();
+  focusResolvedBugModal();
+}
+
+function closeResolvedBugModal(): void {
+  const balloonId = selectedResolvedBug.value?.id;
+  selectedResolvedBug.value = null;
+
+  if (balloonId && activeBalloons.value.some((balloon) => balloon.id === balloonId)) {
+    scheduleBalloonDismiss(balloonId);
+  }
+
+  const trigger = previousResolvedBugTrigger;
+  previousResolvedBugTrigger = null;
+
+  if (trigger) {
+    window.setTimeout(() => {
+      trigger.focus();
+    }, 0);
+  }
+}
+
+function getResolvedBugModalFocusableElements(): HTMLElement[] {
+  return [...(resolvedBugModalRef.value?.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])') ?? [])].filter(
+    (element) => !element.hasAttribute("disabled")
+  );
+}
+
+function focusResolvedBugModal(): void {
+  const [firstFocusable] = getResolvedBugModalFocusableElements();
+  firstFocusable?.focus();
+}
+
+function handleResolvedBugModalKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableElements = getResolvedBugModalFocusableElements();
+
+  if (focusableElements.length === 0) {
+    event.preventDefault();
+    return;
+  }
+
+  const firstFocusable = focusableElements[0];
+  const lastFocusable = focusableElements[focusableElements.length - 1];
+  const activeElement = document.activeElement;
+
+  if (event.shiftKey && (activeElement === firstFocusable || activeElement === resolvedBugModalRef.value)) {
+    event.preventDefault();
+    lastFocusable?.focus();
+    return;
+  }
+
+  if (!event.shiftKey && activeElement === lastFocusable) {
+    event.preventDefault();
+    firstFocusable?.focus();
+  }
+}
+
+function focusResolvedBug(bugId: string): void {
+  highlightedBugId.value = bugId;
+
+  if (highlightedBugTimeoutId !== null) {
+    window.clearTimeout(highlightedBugTimeoutId);
+  }
+
+  highlightedBugTimeoutId = window.setTimeout(() => {
+    if (highlightedBugId.value === bugId) {
+      highlightedBugId.value = null;
+    }
+
+    highlightedBugTimeoutId = null;
+  }, celebrationDurationMs);
+}
+
+function viewSelectedResolvedBug(): void {
+  if (!selectedResolvedBug.value) {
+    return;
+  }
+
+  focusResolvedBug(selectedResolvedBug.value.bugId);
+  closeResolvedBugModal();
+}
+
+function clearCelebrationTimers(): void {
+  for (const timeoutId of balloonTimeouts.values()) {
+    window.clearTimeout(timeoutId);
+  }
+
+  balloonTimeouts.clear();
+
+  if (highlightedBugTimeoutId !== null) {
+    window.clearTimeout(highlightedBugTimeoutId);
+    highlightedBugTimeoutId = null;
+  }
+}
+
+function announceResolvedBug(event: ResolvedBugEvent): void {
+  latestResolvedBug.value = event;
+  resolvedBugHistory.value = [event, ...resolvedBugHistory.value.filter((entry) => entry.bugId !== event.bugId)];
+  selectedResolvedHistoryBugId.value = event.bugId;
+  notifier.notify(event);
+  queueResolvedBugCelebration(event);
+}
+
+function selectResolvedHistory(bugId: string): void {
+  selectedResolvedHistoryBugId.value = bugId;
+}
+
 async function submit(): Promise<void> {
   if (!challenge.value || !selectedRange.value) {
     return;
@@ -275,7 +517,12 @@ async function submit(): Promise<void> {
     if (feedback.value.status === "solved") {
       await refreshChallengeProjection();
       clearSelection();
-      publishResolvedBug(feedback.value);
+
+      const resolvedEvent = buildResolvedBugEvent(feedback.value);
+
+      if (resolvedEvent) {
+        announceResolvedBug(resolvedEvent);
+      }
     }
 
     modalOpen.value = false;
@@ -288,7 +535,11 @@ async function submit(): Promise<void> {
 }
 
 async function fetchSessionProgress(): Promise<SessionProgress> {
-  return requestJson<SessionProgress>(`/api/session-progress/${roomContext.value.sessionId}/${challengeId}`);
+  if (!currentChallengeId.value) {
+    throw new Error("Challenge da sala nao encontrado.");
+  }
+
+  return requestJson<SessionProgress>(`/api/session-progress/${roomContext.value.sessionId}/${currentChallengeId.value}`);
 }
 
 function formatAttemptRange(selection: CodeRange): string {
@@ -296,16 +547,24 @@ function formatAttemptRange(selection: CodeRange): string {
 }
 
 async function loadChallengeState(): Promise<void> {
+  if (!currentChallengeId.value) {
+    loadError.value = "Nenhum template foi associado a esta sala.";
+    loading.value = false;
+    return;
+  }
+
   loading.value = true;
   loadError.value = "";
 
   try {
-    const [challengeResponse, progressResponse, challengeStateResponse] = await Promise.all([
-      requestJson<ChallengeDefinition>(`/api/challenges/${challengeId}`),
+    const [challengeList, challengeResponse, progressResponse, challengeStateResponse] = await Promise.all([
+      requestJson<ChallengeDefinition[]>("/api/challenges"),
+      requestJson<ChallengeDefinition>(`/api/challenges/${currentChallengeId.value}`),
       fetchSessionProgress(),
-      requestJson<ChallengeStateResponse>(`/api/challenge-state/${challengeId}`)
+      requestJson<ChallengeStateResponse>(`/api/challenge-state/${currentChallengeId.value}`)
     ]);
 
+    availableChallenges.value = challengeList;
     challenge.value = challengeResponse;
     sessionProgress.value = progressResponse;
     applyChallengeState(challengeStateResponse);
@@ -317,7 +576,11 @@ async function loadChallengeState(): Promise<void> {
 }
 
 async function refreshChallengeProjection(): Promise<void> {
-  const challengeStateResponse = await requestJson<ChallengeStateResponse>(`/api/challenge-state/${challengeId}`);
+  if (!currentChallengeId.value) {
+    return;
+  }
+
+  const challengeStateResponse = await requestJson<ChallengeStateResponse>(`/api/challenge-state/${currentChallengeId.value}`);
   applyChallengeState(challengeStateResponse);
 }
 
@@ -328,15 +591,28 @@ function applyChallengeState(challengeStateResponse: ChallengeStateResponse): vo
   challengeDisplayState.resolvedBugDiffs = challengeStateResponse.resolvedBugDiffs;
 }
 
+async function loadChallengeCatalog(): Promise<void> {
+  availableChallenges.value = await requestJson<ChallengeDefinition[]>("/api/challenges");
+
+  if (!adminState.challengeId && availableChallenges.value[0]) {
+    adminState.challengeId = availableChallenges.value[0].id;
+  }
+}
+
+function getChallengeLabel(challengeId: string): string {
+  return availableChallenges.value.find((item) => item.id === challengeId)?.title ?? challengeId;
+}
+
 async function loadAdminState(): Promise<void> {
   adminState.loading = true;
   adminState.error = "";
 
   try {
-    const status = await requestJson<AdminStatusResponse>("/api/admin/status");
-    adminState.requiresBootstrap = status.requiresBootstrap;
+    const [status] = await Promise.all([requestJson<AdminStatusResponse>("/api/admin/status"), loadChallengeCatalog()]);
+    adminState.configured = status.configured;
+    adminState.username = status.username ?? adminState.username;
 
-    if (adminState.token && !status.requiresBootstrap) {
+    if (adminState.token && status.configured) {
       adminState.rooms = await requestJson<RoomSummary[]>("/api/admin/rooms", {
         headers: {
           Authorization: `Bearer ${adminState.token}`
@@ -355,19 +631,19 @@ async function submitAdminAuth(): Promise<void> {
   adminState.error = "";
 
   try {
-    const path = adminState.requiresBootstrap ? "/api/admin/bootstrap" : "/api/admin/login";
-    const payload = adminState.requiresBootstrap
-      ? { password: adminState.password }
-      : { username: "admin", password: adminState.password };
-    const response = await requestJson<AdminAuthResponse>(path, {
+    const response = await requestJson<AdminAuthResponse>("/api/admin/login", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        username: adminState.username,
+        password: adminState.password
+      })
     });
 
     adminState.token = response.token;
+    adminState.username = response.username;
     window.localStorage.setItem(adminTokenStorageKey, response.token);
     adminState.password = "";
     await loadAdminState();
@@ -391,7 +667,8 @@ async function createRoom(): Promise<void> {
       },
       body: JSON.stringify({
         name: adminState.roomName,
-        password: adminState.roomPassword
+        password: adminState.roomPassword,
+        challengeId: adminState.challengeId
       })
     });
 
@@ -444,7 +721,8 @@ async function joinRoom(): Promise<void> {
       roomCode: response.roomCode,
       roomName: response.roomName,
       participantSessionId: response.participantSessionId,
-      participantName: response.displayName
+      participantName: response.displayName,
+      challengeId: response.challengeId
     });
     navigate(`/?${params.toString()}`);
   } catch (error) {
@@ -498,28 +776,33 @@ function connectChallengeStream(): void {
     return;
   }
 
+  if (!currentChallengeId.value) {
+    return;
+  }
+
   if (roomContext.value.roomCode) {
     eventSource = new EventSource(`${apiBaseUrl}/api/rooms/${encodeURIComponent(roomContext.value.roomCode)}/events`);
   } else {
-    const params = new URLSearchParams({ challengeId });
+    const params = new URLSearchParams({ challengeId: currentChallengeId.value });
     eventSource = new EventSource(`${apiBaseUrl}/api/events?${params.toString()}`);
   }
-  eventSource.onmessage = (message) => {
-    const event = parseMessage<ResolvedBugEvent>(message.data);
+
+  eventSource.addEventListener("bug.resolved", (message) => {
+    const event = parseMessage<ResolvedBugEvent>((message as MessageEvent<string>).data);
 
     if (!event || event.type !== "bug.resolved") {
       return;
     }
 
-    if (event.challengeId !== challengeId) {
+    if (event.challengeId !== currentChallengeId.value) {
       return;
     }
 
     if (event.sessionId !== roomContext.value.sessionId) {
       void refreshChallengeProjection();
-      notifier.notify(event);
+      announceResolvedBug(event);
     }
-  };
+  });
   eventSource.onerror = closeEventSource;
 }
 
@@ -529,15 +812,15 @@ function connectObserverStream(roomCode: string): void {
   }
 
   eventSource = new EventSource(`${apiBaseUrl}/api/admin/rooms/${encodeURIComponent(roomCode)}/events`);
-  eventSource.onmessage = (message) => {
-    const event = parseMessage<RoomActivityEvent>(message.data);
+  eventSource.addEventListener("room.activity", (message) => {
+    const event = parseMessage<RoomActivityEvent>((message as MessageEvent<string>).data);
 
     if (!event || event.type !== "room.activity" || event.roomCode !== roomCode) {
       return;
     }
 
     observerState.activity = [...observerState.activity, event.item];
-  };
+  });
   eventSource.onerror = closeEventSource;
 }
 
@@ -558,22 +841,18 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function publishResolvedBug(result: SubmitBugResponse): void {
-  if (!challenge.value || !result.bugId) {
-    return;
+function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | null {
+  if (!challenge.value || !result.bugId || !result.resolvedBugDiff) {
+    return null;
   }
 
   const bug = challenge.value.bugs.find((candidate) => candidate.id === result.bugId);
 
   if (!bug) {
-    return;
+    return null;
   }
 
-  if (!result.resolvedBugDiff) {
-    return;
-  }
-
-  const event: ResolvedBugEvent = {
+  return {
     type: "bug.resolved",
     challengeId: challenge.value.id,
     sessionId: roomContext.value.sessionId,
@@ -583,42 +862,79 @@ function publishResolvedBug(result: SubmitBugResponse): void {
     diff: result.resolvedBugDiff,
     shortDescription: bug.expectedFix
   };
-
-  notifier.notify(event);
 }
 </script>
 
 <template>
   <main class="page">
-    <section v-if="route.view === 'admin'" class="workspace admin-workspace">
+    <section v-if="route.view === 'home'" class="workspace home-workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">TS Bug Hunt</p>
+          <h1>Escolha uma sala para jogar</h1>
+          <p class="muted-text">O desafio so fica disponivel depois da entrada em uma sala ativa. A aplicacao agora suporta multiplos templates de bug hunting.</p>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" @click="navigate('/join')">Entrar em sala</button>
+          <button class="secondary-button" type="button" @click="navigate('/admin')">Admin</button>
+        </div>
+      </header>
+
+      <section class="panel panel-stack">
+        <h2>Templates disponiveis</h2>
+        <p class="muted-text">Crie salas com o template default ou com o novo template focado em problemas de TypeScript.</p>
+        <ul class="list-panel">
+          <li v-for="item in availableChallenges" :key="item.id" class="list-item template-item">
+            <div>
+              <strong>{{ item.title }}</strong>
+              <p class="muted-text">{{ item.description }}</p>
+              <p class="muted-text">{{ item.bugs.length }} bugs catalogados</p>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </section>
+
+    <section v-else-if="route.view === 'admin'" class="workspace admin-workspace">
       <header class="topbar">
         <div>
           <p class="eyebrow">TS Bug Hunt</p>
           <h1>Painel admin</h1>
         </div>
         <div class="toolbar-actions">
-          <button class="secondary-button" type="button" @click="navigate('/')">Desafio</button>
+          <button class="secondary-button" type="button" @click="navigate('/')">Home</button>
           <button class="secondary-button" type="button" @click="navigate('/join')">Entrada em sala</button>
         </div>
       </header>
 
       <section class="panel panel-stack">
-        <h2>{{ adminState.requiresBootstrap ? 'Bootstrap admin' : 'Login admin' }}</h2>
-        <p class="muted-text">
-          {{ adminState.requiresBootstrap ? 'Defina a senha inicial do admin.' : 'Entre com o usuario fixo admin.' }}
-        </p>
+        <h2>Login admin</h2>
+        <p class="muted-text">Entre com o usuario e a senha configurados no servidor.</p>
+        <p v-if="!adminState.configured" class="error-text">Credenciais admin nao configuradas no servidor.</p>
+        <label>
+          <span>Usuario</span>
+          <input v-model="adminState.username" type="text" autocomplete="username" />
+        </label>
         <label>
           <span>Senha</span>
-          <input v-model="adminState.password" type="password" />
+          <input v-model="adminState.password" type="password" autocomplete="current-password" />
         </label>
-        <button :disabled="adminState.loading" type="button" @click="submitAdminAuth">
-          {{ adminState.requiresBootstrap ? 'Configurar admin' : 'Entrar' }}
+        <button :disabled="adminState.loading || !adminState.configured" type="button" @click="submitAdminAuth">
+          Entrar
         </button>
         <p v-if="adminState.error" class="error-text">{{ adminState.error }}</p>
       </section>
 
       <section v-if="adminState.token" class="panel panel-stack">
         <h2>Criar sala</h2>
+        <label>
+          <span>Template do desafio</span>
+          <select v-model="adminState.challengeId">
+            <option v-for="item in availableChallenges" :key="item.id" :value="item.id">
+              {{ item.title }}
+            </option>
+          </select>
+        </label>
         <label>
           <span>Nome da sala</span>
           <input v-model="adminState.roomName" type="text" />
@@ -638,6 +954,7 @@ function publishResolvedBug(result: SubmitBugResponse): void {
             <div>
               <strong>{{ room.name }}</strong>
               <p class="muted-text">Codigo: {{ room.roomCode }} | Status: {{ room.status }}</p>
+              <p class="muted-text">Template: {{ getChallengeLabel(room.challengeId) }}</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-button" type="button" @click="navigate(`/room/${room.roomCode}`)">Ver sala</button>
@@ -655,7 +972,7 @@ function publishResolvedBug(result: SubmitBugResponse): void {
           <h1>Entrar em sala</h1>
         </div>
         <div class="toolbar-actions">
-          <button class="secondary-button" type="button" @click="navigate('/')">Desafio</button>
+          <button class="secondary-button" type="button" @click="navigate('/')">Home</button>
           <button class="secondary-button" type="button" @click="navigate('/admin')">Admin</button>
         </div>
       </header>
@@ -683,7 +1000,7 @@ function publishResolvedBug(result: SubmitBugResponse): void {
         <div class="toolbar-actions">
           <button class="secondary-button" type="button" @click="navigate('/admin')">Admin</button>
           <button class="secondary-button" type="button" @click="navigate('/join')">Entrada em sala</button>
-          <button v-if="adminState.token" class="secondary-button" type="button" @click="navigate('/')">Voltar ao desafio</button>
+          <button class="secondary-button" type="button" @click="navigate('/')">Home</button>
         </div>
       </header>
 
@@ -713,7 +1030,8 @@ function publishResolvedBug(result: SubmitBugResponse): void {
       <header class="topbar">
         <div>
           <p class="eyebrow">TS Bug Hunt</p>
-          <h1>{{ challenge?.title ?? 'Carregando desafio' }}</h1>
+          <h1>{{ challenge?.title ?? currentChallengeSummary?.title ?? 'Carregando desafio' }}</h1>
+          <p v-if="currentChallengeSummary?.description" class="muted-text">{{ currentChallengeSummary.description }}</p>
           <p v-if="roomContext.roomCode" class="muted-text room-banner">
             Sala {{ roomContext.roomName || roomContext.roomCode }} | Participante {{ roomContext.participantName }}
           </p>
@@ -725,7 +1043,8 @@ function publishResolvedBug(result: SubmitBugResponse): void {
       </header>
 
       <div class="toolbar-actions top-links">
-        <button class="secondary-button" type="button" @click="navigate('/join')">Entrada em sala</button>
+        <button class="secondary-button" type="button" @click="navigate('/')">Home</button>
+        <button class="secondary-button" type="button" @click="navigate('/join')">Trocar de sala</button>
         <button class="secondary-button" type="button" @click="navigate('/admin')">Admin</button>
         <button
           v-if="roomContext.roomCode && adminState.token"
@@ -743,6 +1062,19 @@ function publishResolvedBug(result: SubmitBugResponse): void {
           <p>{{ notification.message }}</p>
         </div>
         <button class="secondary-button dismiss-button" type="button" @click="dismissNotification">Fechar</button>
+      </section>
+
+      <section v-if="activeBalloons.length > 0" class="celebration-layer" aria-live="polite">
+        <button
+          v-for="balloon in activeBalloons"
+          :key="balloon.id"
+          class="celebration-balloon"
+          type="button"
+          @click="openResolvedBugModal(balloon.id)"
+        >
+          <span class="celebration-label">Bug resolvido</span>
+          <strong>{{ balloon.bugId }}</strong>
+        </button>
       </section>
 
       <div v-if="loading" class="panel">Carregando desafio...</div>
@@ -779,6 +1111,7 @@ function publishResolvedBug(result: SubmitBugResponse): void {
             <CodeViewer
               :selected-range="selectedRange"
               :resolved-bug-diffs="challengeDisplayState.resolvedBugDiffs"
+              :highlighted-bug-id="highlightedBugId"
               :source="displayedSource"
               @clear-selection="clearSelection"
               @range-selected="handleRangeSelected"
@@ -818,13 +1151,53 @@ function publishResolvedBug(result: SubmitBugResponse): void {
               </template>
             </section>
 
+            <section v-if="resolvedBugHistory.length > 0" class="panel panel-stack latest-resolved-panel">
+              <div class="history-header">
+                <h2>Historico de resolucoes</h2>
+                <span class="metric-label">{{ resolvedBugHistory.length }} registradas</span>
+              </div>
+              <ul class="list-panel history-list">
+                <li v-for="entry in resolvedBugHistory" :key="entry.bugId" class="list-item history-item">
+                  <button
+                    :class="['history-select-button', { 'history-select-button-active': selectedResolvedHistoryEntry?.bugId === entry.bugId }]"
+                    type="button"
+                    @click="selectResolvedHistory(entry.bugId)"
+                  >
+                    <strong>{{ entry.bugId }}</strong>
+                    <span>{{ entry.title }}</span>
+                  </button>
+                </li>
+              </ul>
+
+              <template v-if="selectedResolvedHistoryEntry">
+                <p><strong>{{ selectedResolvedHistoryEntry.bugId }}</strong> {{ selectedResolvedHistoryEntry.title }}</p>
+                <p>{{ selectedResolvedHistoryEntry.shortDescription }}</p>
+                <div class="toolbar-actions">
+                  <button class="secondary-button" type="button" @click="focusResolvedBug(selectedResolvedHistoryEntry.bugId)">Ver no editor</button>
+                </div>
+                <div class="diff-preview-grid">
+                  <div>
+                    <span class="metric-label">Antes</span>
+                    <pre class="diff-preview"><code>{{ selectedResolvedHistoryEntry.diff.beforeText }}</code></pre>
+                  </div>
+                  <div>
+                    <span class="metric-label">Depois</span>
+                    <pre class="diff-preview"><code>{{ selectedResolvedHistoryEntry.diff.afterText }}</code></pre>
+                  </div>
+                </div>
+              </template>
+            </section>
+
             <section class="panel resolved-panel">
               <h2>Bugs resolvidos</h2>
               <p v-if="solvedBugs.length === 0" class="muted-text">Nenhum bug resolvido ainda.</p>
               <ul v-else class="list-panel">
-                <li v-for="bug in solvedBugs" :key="bug.id" class="list-item">
-                  <strong>{{ bug.id }}</strong>
-                  <span>{{ bug.title }}</span>
+                <li v-for="bug in solvedBugs" :key="bug.id" class="list-item room-item">
+                  <div>
+                    <strong>{{ bug.id }}</strong>
+                    <span>{{ bug.title }}</span>
+                  </div>
+                  <button class="secondary-button" type="button" @click="focusResolvedBug(bug.id)">Ver no editor</button>
                 </li>
               </ul>
             </section>
@@ -857,5 +1230,48 @@ function publishResolvedBug(result: SubmitBugResponse): void {
       @submit="submit"
       @update:value="form.proposedFix = $event"
     />
+
+    <teleport to="body">
+      <div v-if="selectedResolvedBug" class="modal-backdrop" @click.self="closeResolvedBugModal">
+        <div ref="resolvedBugModalRef" class="modal-card resolved-modal" role="dialog" aria-modal="true" aria-labelledby="resolved-bug-modal-title" tabindex="-1" @keydown="handleResolvedBugModalKeydown">
+          <header class="modal-header">
+            <div>
+              <p class="eyebrow">Celebracao</p>
+              <h2 id="resolved-bug-modal-title">{{ selectedResolvedBug.bugId }} resolvido</h2>
+            </div>
+            <button class="icon-button" type="button" @click="closeResolvedBugModal">Fechar</button>
+          </header>
+
+          <div class="modal-body">
+            <p><strong>{{ selectedResolvedBug.title }}</strong></p>
+            <p>{{ selectedResolvedBug.shortDescription }}</p>
+
+            <section class="range-chip">
+              <span class="metric-label">Trecho corrigido</span>
+              <strong>
+                L{{ selectedResolvedBug.diff.appliedRange.startLine }}:C{{ selectedResolvedBug.diff.appliedRange.startColumn }} ate
+                L{{ selectedResolvedBug.diff.appliedRange.endLine }}:C{{ selectedResolvedBug.diff.appliedRange.endColumn }}
+              </strong>
+            </section>
+
+            <section class="diff-preview-grid">
+              <div>
+                <span class="metric-label">Antes</span>
+                <pre class="diff-preview"><code>{{ selectedResolvedBug.diff.beforeText }}</code></pre>
+              </div>
+              <div>
+                <span class="metric-label">Depois</span>
+                <pre class="diff-preview"><code>{{ selectedResolvedBug.diff.afterText }}</code></pre>
+              </div>
+            </section>
+          </div>
+
+          <footer class="modal-actions">
+            <button class="secondary-button" type="button" @click="closeResolvedBugModal">Fechar</button>
+            <button type="button" @click="viewSelectedResolvedBug">Ver bug resolvido</button>
+          </footer>
+        </div>
+      </div>
+    </teleport>
   </main>
 </template>

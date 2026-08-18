@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import { createServer } from "../dist/apps/api/src/server.js";
 
@@ -8,8 +11,12 @@ let server: http.Server;
 let baseUrl: string;
 let adminToken = "";
 let roomCode = "";
+const originalAdminUsername = process.env.TS_BUG_HUNT_ADMIN_USERNAME;
+const originalAdminPassword = process.env.TS_BUG_HUNT_ADMIN_PASSWORD;
 
 test.before(async () => {
+  process.env.TS_BUG_HUNT_ADMIN_USERNAME = "admin";
+  process.env.TS_BUG_HUNT_ADMIN_PASSWORD = "secret-123";
   server = createServer();
   await new Promise<void>((resolve) => {
     server.listen(0, () => resolve());
@@ -25,41 +32,28 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
+  await closeServer(server);
 
-      resolve();
-    });
-  });
+  if (originalAdminUsername === undefined) {
+    delete process.env.TS_BUG_HUNT_ADMIN_USERNAME;
+  } else {
+    process.env.TS_BUG_HUNT_ADMIN_USERNAME = originalAdminUsername;
+  }
+
+  if (originalAdminPassword === undefined) {
+    delete process.env.TS_BUG_HUNT_ADMIN_PASSWORD;
+  } else {
+    process.env.TS_BUG_HUNT_ADMIN_PASSWORD = originalAdminPassword;
+  }
 });
 
-test("GET /api/admin/status informa bootstrap pendente no inicio", async () => {
+test("GET /api/admin/status informa que o login admin esta configurado", async () => {
   const response = await fetch(`${baseUrl}/api/admin/status`);
   const payload = await response.json();
 
   assert.equal(response.status, 200);
-  assert.equal(payload.requiresBootstrap, true);
-});
-
-test("POST /api/admin/bootstrap configura admin e retorna token", async () => {
-  const response = await fetch(`${baseUrl}/api/admin/bootstrap`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ password: "secret-123" })
-  });
-  const payload = await response.json();
-
-  assert.equal(response.status, 200);
+  assert.equal(payload.configured, true);
   assert.equal(payload.username, "admin");
-  assert.ok(typeof payload.token === "string");
-
-  adminToken = payload.token;
 });
 
 test("POST /api/admin/login autentica o admin configurado", async () => {
@@ -73,7 +67,10 @@ test("POST /api/admin/login autentica o admin configurado", async () => {
   const payload = await response.json();
 
   assert.equal(response.status, 200);
-  assert.equal(payload.token, adminToken);
+  assert.equal(payload.token, "admin-session-token");
+  assert.equal(payload.username, "admin");
+
+  adminToken = payload.token;
 });
 
 test("POST /api/admin/rooms cria sala autenticada e GET /api/admin/rooms lista a sala", async () => {
@@ -83,7 +80,7 @@ test("POST /api/admin/rooms cria sala autenticada e GET /api/admin/rooms lista a
       Authorization: `Bearer ${adminToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ name: "Turma 1", password: "room-secret" })
+    body: JSON.stringify({ name: "Turma 1", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
   });
   const createdRoom = await createResponse.json();
 
@@ -122,6 +119,7 @@ test("POST /api/rooms/join permite entrada em sala ativa", async () => {
   assert.equal(payload.roomName, "Turma 1");
   assert.equal(payload.displayName, "Risso");
   assert.equal(payload.challengeId, "checkout-ts-bug-hunt");
+  assert.equal(payload.challengeTitle, "Checkout TypeScript Challenge");
   assert.ok(typeof payload.participantSessionId === "string");
 });
 
@@ -356,7 +354,7 @@ test("GET /api/rooms/:roomCode/events transmite atividade de sala segregada por 
       Authorization: `Bearer ${adminToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ name: "Turma SSE", password: "room-secret" })
+    body: JSON.stringify({ name: "Turma SSE", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
   });
   const createdRoom = await createResponse.json();
   const stream = openEventStream(`/api/rooms/${createdRoom.roomCode}/events`);
@@ -387,12 +385,134 @@ test("GET /api/rooms/:roomCode/events transmite atividade de sala segregada por 
   stream.close();
 });
 
-function openEventStream(path: string): {
+test("createServer reidrata estado persistido depois de reiniciar a API", async (t) => {
+  const tempDir = mkdtempSync(path.join(tmpdir(), "ts-bug-hunt-state-"));
+  const stateFilePath = path.join(tempDir, "api-state.json");
+  t.after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let persistentServer = createServer({ stateFilePath });
+  await new Promise<void>((resolve) => {
+    persistentServer.listen(0, () => resolve());
+  });
+
+  let address = persistentServer.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Nao foi possivel obter a porta do servidor persistente.");
+  }
+
+  let persistentBaseUrl = `http://127.0.0.1:${address.port}`;
+
+  const loginResponseBeforeRestart = await fetch(`${persistentBaseUrl}/api/admin/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ username: "admin", password: "secret-123" })
+  });
+  const loginPayloadBeforeRestart = await loginResponseBeforeRestart.json();
+  const persistentToken = loginPayloadBeforeRestart.token;
+
+  const createRoomResponse = await fetch(`${persistentBaseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${persistentToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Persisted Room", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const createdRoom = await createRoomResponse.json();
+
+  await fetch(`${persistentBaseUrl}/api/rooms/join`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ roomCode: createdRoom.roomCode, displayName: "Persist User" })
+  });
+
+  await fetch(`${persistentBaseUrl}/api/submissions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "persisted-session",
+      roomCode: createdRoom.roomCode,
+      participantName: "Persist User",
+      selection: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
+      proposedFix: "Trocar <= por < porque existe um off-by-one no loop."
+    })
+  });
+
+  await closeServer(persistentServer);
+
+  persistentServer = createServer({ stateFilePath });
+  await new Promise<void>((resolve) => {
+    persistentServer.listen(0, () => resolve());
+  });
+  t.after(async () => {
+    await closeServer(persistentServer);
+  });
+
+  address = persistentServer.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Nao foi possivel obter a porta do servidor persistente reidratado.");
+  }
+
+  persistentBaseUrl = `http://127.0.0.1:${address.port}`;
+
+  const statusResponse = await fetch(`${persistentBaseUrl}/api/admin/status`);
+  const statusPayload = await statusResponse.json();
+  assert.equal(statusPayload.configured, true);
+  assert.equal(statusPayload.username, "admin");
+
+  const loginResponse = await fetch(`${persistentBaseUrl}/api/admin/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ username: "admin", password: "secret-123" })
+  });
+  const loginPayload = await loginResponse.json();
+  assert.equal(loginResponse.status, 200);
+
+  const roomsResponse = await fetch(`${persistentBaseUrl}/api/admin/rooms`, {
+    headers: {
+      Authorization: `Bearer ${loginPayload.token}`
+    }
+  });
+  const roomsPayload = await roomsResponse.json();
+  assert.equal(roomsPayload.some((room: { roomCode: string }) => room.roomCode === createdRoom.roomCode), true);
+
+  const progressResponse = await fetch(`${persistentBaseUrl}/api/session-progress/persisted-session/checkout-ts-bug-hunt`);
+  const progressPayload = await progressResponse.json();
+  assert.deepEqual(progressPayload.solvedBugIds, ["B002"]);
+
+  const challengeStateResponse = await fetch(`${persistentBaseUrl}/api/challenge-state/checkout-ts-bug-hunt`);
+  const challengeStatePayload = await challengeStateResponse.json();
+  assert.deepEqual(challengeStatePayload.resolvedBugOrder, ["B002"]);
+
+  const activityResponse = await fetch(`${persistentBaseUrl}/api/admin/rooms/${createdRoom.roomCode}/activity`, {
+    headers: {
+      Authorization: `Bearer ${loginPayload.token}`
+    }
+  });
+  const activityPayload = await activityResponse.json();
+  assert.equal(activityPayload.items.length, 1);
+  assert.equal(activityPayload.items[0].submittedBy, "Persist User");
+});
+
+function openEventStream(pathname: string): {
   ready: Promise<void>;
   eventPromise: Promise<Record<string, any>>;
   close: () => void;
 } {
-  const request = http.get(`${baseUrl}${path}`);
+  const request = http.get(`${baseUrl}${pathname}`);
   let resolveReady: (() => void) | undefined;
   let rejectReady: ((error: Error) => void) | undefined;
 
@@ -421,11 +541,16 @@ function openEventStream(path: string): {
         clearTimeout(timeout);
         resolve(JSON.parse(match[1]));
       });
+
+      response.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
     });
 
     request.on("error", (error) => {
+      rejectReady?.(error);
       clearTimeout(timeout);
-      rejectReady?.(error as Error);
       reject(error);
     });
   });
@@ -435,4 +560,17 @@ function openEventStream(path: string): {
     eventPromise,
     close: () => request.destroy()
   };
+}
+
+async function closeServer(server: http.Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
 }

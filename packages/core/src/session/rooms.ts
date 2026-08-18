@@ -6,11 +6,28 @@ import type {
   SubmissionStatus
 } from "../types.js";
 
+export type AdminCredentials = {
+  username: string;
+  passwordHash: string;
+};
+
+export type AdminStoreSnapshot = {
+  configured: boolean;
+  username?: string;
+};
+
+export type RoomStoreSnapshot = {
+  rooms: Room[];
+  participants: ParticipantSession[];
+  activity: Record<string, RoomActivityItem[]>;
+};
+
 type CreateRoomInput = {
   id: string;
   name: string;
   passwordHash: string;
   roomCode: string;
+  challengeId: string;
   createdAt: string;
 };
 
@@ -25,23 +42,25 @@ type RecordActivityInput = {
 };
 
 export class InMemoryAdminStore {
-  private passwordHash: string | null = null;
+  constructor(private credentials: AdminCredentials | null = null) {}
 
   isConfigured(): boolean {
-    return this.passwordHash !== null;
+    return this.credentials !== null;
   }
 
-  configure(passwordHash: string): boolean {
-    if (this.passwordHash !== null) {
-      return false;
-    }
-
-    this.passwordHash = passwordHash;
-    return true;
+  getUsername(): string | undefined {
+    return this.credentials?.username;
   }
 
-  authenticate(passwordHash: string): boolean {
-    return this.passwordHash !== null && this.passwordHash === passwordHash;
+  authenticate(username: string, passwordHash: string): boolean {
+    return this.credentials?.username === username && this.credentials.passwordHash === passwordHash;
+  }
+
+  snapshot(): AdminStoreSnapshot {
+    return {
+      configured: this.isConfigured(),
+      username: this.credentials?.username
+    };
   }
 }
 
@@ -49,6 +68,20 @@ export class InMemoryRoomStore {
   private rooms = new Map<string, Room>();
   private participants = new Map<string, ParticipantSession>();
   private activity = new Map<string, RoomActivityItem[]>();
+
+  constructor(initial: Partial<RoomStoreSnapshot> = {}) {
+    for (const room of initial.rooms ?? []) {
+      this.rooms.set(room.roomCode, room);
+    }
+
+    for (const participant of initial.participants ?? []) {
+      this.participants.set(participant.id, participant);
+    }
+
+    for (const [roomCode, items] of Object.entries(initial.activity ?? {})) {
+      this.activity.set(roomCode, items);
+    }
+  }
 
   listRooms(): RoomSummary[] {
     return [...this.rooms.values()].map(({ passwordHash: _passwordHash, ...room }) => room);
@@ -60,6 +93,7 @@ export class InMemoryRoomStore {
       name: input.name,
       passwordHash: input.passwordHash,
       roomCode: input.roomCode,
+      challengeId: input.challengeId,
       status: "active",
       createdAt: input.createdAt
     };
@@ -133,5 +167,13 @@ export class InMemoryRoomStore {
     const current = this.activity.get(input.roomCode) ?? [];
     this.activity.set(input.roomCode, [...current, activityItem]);
     return activityItem;
+  }
+
+  snapshot(): RoomStoreSnapshot {
+    return {
+      rooms: [...this.rooms.values()],
+      participants: [...this.participants.values()],
+      activity: Object.fromEntries(this.activity.entries())
+    };
   }
 }

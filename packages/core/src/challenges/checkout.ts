@@ -78,6 +78,7 @@ export async function calculateCheckout(input: CheckoutInput) {
 export const checkoutChallenge: ChallengeDefinition = {
   id: "checkout-ts-bug-hunt",
   title: "Checkout TypeScript Challenge",
+  description: "Template default com bugs de checkout misturando runtime safety, regras de negocio e efeitos colaterais.",
   language: "typescript",
   source,
   bugs: [
@@ -105,7 +106,7 @@ export const checkoutChallenge: ChallengeDefinition = {
       expectedFix: "Trocar <= por < no limite do loop.",
       technicalBasis: "Array vai de 0 ate length - 1.",
       patch: {
-        range: { startLine: 35, startColumn: 23, endLine: 35, endColumn: 46 },
+        range: { startLine: 35, startColumn: 19, endLine: 35, endColumn: 42 },
         replacement: "i < input.items.length"
       }
     },

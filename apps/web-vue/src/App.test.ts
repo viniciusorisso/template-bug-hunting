@@ -73,12 +73,35 @@ const resolvedCouponState: ChallengeStateResponse = {
   )
 };
 
+const resolvedCombinedState: ChallengeStateResponse = {
+  challengeId: challenge.id,
+  baseSource: challenge.source,
+  resolvedBugOrder: ["B003", "B002"],
+  resolvedBugDiffs: {
+    B003: resolvedCouponDiff,
+    B002: resolvedLoopDiff
+  },
+  displayedSource: challenge.source
+    .replace(
+      "candidate.code === input.couponCode!.toUpperCase()",
+      "candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()"
+    )
+    .replace("i <= input.items.length", "i < input.items.length")
+};
+
+const challengeRoute = `/?roomCode=ROOM01&roomName=Turma%201&participantSessionId=session-1&participantName=Risso&challengeId=${challenge.id}`;
+
 describe("App", () => {
   beforeEach(() => {
-    window.history.pushState({}, "", "/");
+    window.history.pushState({}, "", challengeRoute);
     window.localStorage.clear();
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn()
+    });
   });
 
   it("loads the challenge, challenge-state and session progress", async () => {
@@ -86,6 +109,10 @@ describe("App", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
         if (input.endsWith(`/api/challenges/${challenge.id}`)) {
           return createJsonResponse(challenge);
         }
@@ -145,6 +172,10 @@ describe("App", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
         if (input.endsWith(`/api/challenges/${challenge.id}`)) {
           return createJsonResponse(challenge);
         }
@@ -198,6 +229,14 @@ describe("App", () => {
     expect(wrapper.find(".code-viewer").text()).toContain("i < input.items.length");
     expect(wrapper.find('[data-resolved-bugs="B002"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("1/10");
+    expect(document.body.textContent).toContain("Bug resolvidoB002");
+    expect(wrapper.text()).toContain("Historico de resolucoes");
+    expect(wrapper.text()).toContain("i <= input.items.length");
+    expect(wrapper.text()).toContain("i < input.items.length");
+    const resolvedPanelButton = wrapper.find(".resolved-panel .secondary-button");
+    await resolvedPanelButton.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-resolved-bugs="B002"]').classes()).toContain("code-line-highlighted");
   });
 
   it("refreshes challenge-state and shows a realtime notification from another session", async () => {
@@ -207,6 +246,10 @@ describe("App", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
         if (input.endsWith(`/api/challenges/${challenge.id}`)) {
           return createJsonResponse(challenge);
         }
@@ -248,15 +291,273 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Bug resolvido: B003");
     expect(wrapper.find(".code-viewer").text()).toContain("candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()");
     expect(wrapper.find('[data-resolved-bugs="B003"]').exists()).toBe(true);
+    expect(document.body.querySelector(".celebration-balloon")?.textContent).toContain("B003");
   });
 
-  it("bootstraps admin and lists created rooms", async () => {
-    vi.stubGlobal("EventSource", createEventSourceStub());
-
-    let adminStatusCalls = 0;
+  it("opens the celebration modal and highlights the resolved bug on demand", async () => {
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
+    let challengeStateRequestCount = 0;
     vi.stubGlobal(
       "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+          challengeStateRequestCount += 1;
+          return createJsonResponse(challengeStateRequestCount > 1 ? resolvedCouponState : emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-remote",
+      bugId: "B003",
+      title: "Cupom falha com couponCode ausente ou sem normalizacao completa",
+      resolvedAt: "2026-08-18T00:00:00.000Z",
+      diff: resolvedCouponDiff,
+      shortDescription: "Normalizar couponCode e candidate.code com trim e uppercase, sem usar !."
+    } satisfies ResolvedBugEvent);
+    await flushPromises();
+
+    const balloonButton = document.body.querySelector(".celebration-balloon") as HTMLButtonElement | null;
+    balloonButton?.focus();
+    balloonButton?.click();
+    await flushPromises();
+
+    expect(document.body.textContent).toContain("B003 resolvido");
+    expect(document.body.textContent).toContain("Antes");
+    expect(document.body.textContent).toContain("Depois");
+    expect(document.activeElement?.textContent).toContain("Fechar");
+
+    const modalButtons = document.body.querySelectorAll(".resolved-modal .modal-actions button");
+    (modalButtons[1] as HTMLButtonElement | undefined)?.click();
+    await flushPromises();
+
+    expect(wrapper.find('[data-resolved-bugs="B003"]').classes()).toContain("code-line-highlighted");
+  });
+
+  it("restores focus to the balloon trigger when the resolved-bug modal closes", async () => {
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+          return createJsonResponse(resolvedCouponState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    mount(App, {
+      attachTo: document.body
+    });
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-remote",
+      bugId: "B003",
+      title: "Cupom falha com couponCode ausente ou sem normalizacao completa",
+      resolvedAt: "2026-08-18T00:00:00.000Z",
+      diff: resolvedCouponDiff,
+      shortDescription: "Normalizar couponCode e candidate.code com trim e uppercase, sem usar !."
+    } satisfies ResolvedBugEvent);
+    await flushPromises();
+
+    const balloonButton = document.body.querySelector(".celebration-balloon") as HTMLButtonElement | null;
+    balloonButton?.focus();
+    balloonButton?.click();
+    await flushPromises();
+
+    (document.body.querySelector(".resolved-modal .icon-button") as HTMLButtonElement | null)?.click();
+    await flushPromises();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(document.activeElement).toBe(balloonButton);
+  });
+
+  it("lets the user inspect older resolved diffs from history", async () => {
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
+    let challengeStateRequestCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+          challengeStateRequestCount += 1;
+
+          if (challengeStateRequestCount === 1) {
+            return createJsonResponse(emptyChallengeState);
+          }
+
+          if (challengeStateRequestCount === 2) {
+            return createJsonResponse(resolvedCouponState);
+          }
+
+          return createJsonResponse(resolvedCombinedState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-remote-a",
+      bugId: "B003",
+      title: "Cupom falha com couponCode ausente ou sem normalizacao completa",
+      resolvedAt: "2026-08-18T00:00:00.000Z",
+      diff: resolvedCouponDiff,
+      shortDescription: "Normalizar couponCode e candidate.code com trim e uppercase, sem usar !."
+    } satisfies ResolvedBugEvent);
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-remote-b",
+      bugId: "B002",
+      title: "Loop percorre item extra ao usar <=",
+      resolvedAt: "2026-08-18T00:01:00.000Z",
+      diff: resolvedLoopDiff,
+      shortDescription: "Trocar <= por < porque existe um off-by-one no loop."
+    } satisfies ResolvedBugEvent);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("2 registradas");
+    expect(wrapper.text()).toContain("Loop percorre item extra ao usar <=");
+    expect(wrapper.text()).toContain("i <= input.items.length");
+
+    const historyButtons = wrapper.findAll(".history-select-button");
+    await historyButtons[1]!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Cupom falha com couponCode ausente ou sem normalizacao completa");
+    expect(wrapper.text()).toContain("candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()");
+  });
+
+  it("dismisses celebration balloons automatically after 4 seconds", async () => {
+    vi.useFakeTimers();
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+          return createJsonResponse(resolvedCouponState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    mount(App, {
+      attachTo: document.body
+    });
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-remote",
+      bugId: "B003",
+      title: "Cupom falha com couponCode ausente ou sem normalizacao completa",
+      resolvedAt: "2026-08-18T00:00:00.000Z",
+      diff: resolvedCouponDiff,
+      shortDescription: "Normalizar couponCode e candidate.code com trim e uppercase, sem usar !."
+    } satisfies ResolvedBugEvent);
+    await flushPromises();
+
+    expect(document.body.querySelector(".celebration-balloon")).not.toBeNull();
+
+    vi.advanceTimersByTime(4000);
+    await flushPromises();
+
+    expect(document.body.querySelector(".celebration-balloon")).toBeNull();
+  });
+
+  it("authenticates admin and lists created rooms", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+
+        vi.stubGlobal(
+      "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
         if (input.endsWith(`/api/challenges/${challenge.id}`)) {
           return createJsonResponse(challenge);
         }
@@ -270,17 +571,16 @@ describe("App", () => {
         }
 
         if (input.endsWith("/api/admin/status")) {
-          adminStatusCalls += 1;
-          return createJsonResponse({ requiresBootstrap: adminStatusCalls === 1 });
+          return createJsonResponse({ configured: true, username: "admin" });
         }
 
-        if (input.endsWith("/api/admin/bootstrap") && init?.method === "POST") {
+        if (input.endsWith("/api/admin/login") && init?.method === "POST") {
           return createJsonResponse({ token: "admin-token", username: "admin" });
         }
 
         if (input.endsWith("/api/admin/rooms") && init?.method === undefined) {
           return createJsonResponse([
-            { id: "room-1", name: "Turma 1", roomCode: "ROOM01", status: "active", createdAt: "2026-08-18" }
+            { id: "room-1", name: "Turma 1", roomCode: "ROOM01", challengeId: challenge.id, status: "active", createdAt: "2026-08-18" }
           ]);
         }
 
@@ -289,14 +589,17 @@ describe("App", () => {
     );
     window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
 
+    window.history.pushState({}, "", "/admin");
+
     const wrapper = mount(App, {
       attachTo: document.body
     });
 
     await flushPromises();
-    await wrapper.findAll(".top-links button")[1]!.trigger("click");
     await flushPromises();
-    const passwordInput = wrapper.find('input[type="password"]');
+    const usernameInput = wrapper.find('input[autocomplete="username"]');
+    const passwordInput = wrapper.find('input[autocomplete="current-password"]');
+    await usernameInput.setValue("admin");
     await passwordInput.setValue("secret-123");
     await wrapper.find(".panel button").trigger("click");
     await flushPromises();
@@ -319,8 +622,13 @@ describe("App", () => {
             roomCode: "ROOM01",
             roomName: "Turma 1",
             displayName: "Risso",
-            challengeId: challenge.id
+            challengeId: challenge.id,
+            challengeTitle: challenge.title
           });
+        }
+
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
         }
 
         if (input.endsWith(`/api/challenges/${challenge.id}`)) {
@@ -428,17 +736,30 @@ function createEventSourceStub() {
 
     onerror: (() => void) | null = null;
     onmessage: ((event: MessageEvent<string>) => void) | null = null;
+    private listeners = new Map<string, Array<(event: MessageEvent<string>) => void>>();
 
     constructor(public readonly url: string) {
       EventSourceStub.instances.push(this);
+    }
+
+    addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void {
+      const current = this.listeners.get(type) ?? [];
+      this.listeners.set(type, [...current, listener]);
     }
 
     close(): void {
       return;
     }
 
-    emit(payload: unknown): void {
-      this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent<string>);
+    emit(payload: { type?: string } & Record<string, unknown>): void {
+      const event = { data: JSON.stringify(payload) } as MessageEvent<string>;
+      const namedListeners = payload.type ? this.listeners.get(payload.type) ?? [] : [];
+
+      for (const listener of namedListeners) {
+        listener(event);
+      }
+
+      this.onmessage?.(event);
     }
   }
 

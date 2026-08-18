@@ -20,7 +20,15 @@ import {
   validateMoneyRounding,
   validateOptionalPlanRule,
   validateTaxRounding,
-  validateUserIdGuard
+  validateUserIdGuard,
+  validateProfileEmailNonNullAssertion,
+  validateProfileIdNonNullAssertion,
+  validateProfileMetadataAssertion,
+  validateProfileNotificationExhaustiveness,
+  validateProfilePreferencesAssertion,
+  validateProfileReadonlyAssertionAlias,
+  validateProfileReadonlyRoleMutation,
+  validateProfileSharedDefaultShortcuts
 } from "./validators.js";
 
 export function runBugValidation(
@@ -48,6 +56,22 @@ export function runBugValidation(
       return validateInputMutation(context);
     case "CHECKOUT_010_TAX_ROUNDING":
       return validateTaxRounding(context);
+    case "PROFILE_001_ID_NON_NULL_ASSERTION":
+      return validateProfileIdNonNullAssertion(context);
+    case "PROFILE_002_EMAIL_NON_NULL_ASSERTION":
+      return validateProfileEmailNonNullAssertion(context);
+    case "PROFILE_003_READONLY_ASSERTION_ALIAS":
+      return validateProfileReadonlyAssertionAlias(context);
+    case "PROFILE_004_READONLY_ROLE_MUTATION":
+      return validateProfileReadonlyRoleMutation(context);
+    case "PROFILE_005_SHARED_DEFAULT_SHORTCUTS":
+      return validateProfileSharedDefaultShortcuts(context);
+    case "PROFILE_006_PREFERENCES_ASSERTION":
+      return validateProfilePreferencesAssertion(context);
+    case "PROFILE_007_METADATA_ASSERTION":
+      return validateProfileMetadataAssertion(context);
+    case "PROFILE_008_NOTIFICATION_EXHAUSTIVENESS":
+      return validateProfileNotificationExhaustiveness(context);
   }
 }
 

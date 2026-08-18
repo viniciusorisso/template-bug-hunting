@@ -49,7 +49,15 @@ export type BugValidationTestId =
   | "CHECKOUT_007_ASSIGNMENT_IN_CONDITION"
   | "CHECKOUT_008_MONEY_ROUNDING"
   | "CHECKOUT_009_INPUT_MUTATION"
-  | "CHECKOUT_010_TAX_ROUNDING";
+  | "CHECKOUT_010_TAX_ROUNDING"
+  | "PROFILE_001_ID_NON_NULL_ASSERTION"
+  | "PROFILE_002_EMAIL_NON_NULL_ASSERTION"
+  | "PROFILE_003_READONLY_ASSERTION_ALIAS"
+  | "PROFILE_004_READONLY_ROLE_MUTATION"
+  | "PROFILE_005_SHARED_DEFAULT_SHORTCUTS"
+  | "PROFILE_006_PREFERENCES_ASSERTION"
+  | "PROFILE_007_METADATA_ASSERTION"
+  | "PROFILE_008_NOTIFICATION_EXHAUSTIVENESS";
 
 export type BugDefinition = {
   id: string;
@@ -66,6 +74,7 @@ export type BugDefinition = {
 export type ChallengeDefinition = {
   id: string;
   title: string;
+  description: string;
   language: "typescript";
   source: string;
   bugs: BugDefinition[];
@@ -128,6 +137,7 @@ export type Room = {
   id: string;
   name: string;
   roomCode: string;
+  challengeId: string;
   passwordHash: string;
   status: RoomStatus;
   createdAt: string;
@@ -166,7 +176,8 @@ export type RoomActivityEvent = {
 };
 
 export type AdminStatusResponse = {
-  requiresBootstrap: boolean;
+  configured: boolean;
+  username?: string;
 };
 
 export type AdminAuthRequest = {
@@ -176,12 +187,13 @@ export type AdminAuthRequest = {
 
 export type AdminAuthResponse = {
   token: string;
-  username: "admin";
+  username: string;
 };
 
 export type CreateRoomRequest = {
   name: string;
   password: string;
+  challengeId: string;
 };
 
 export type JoinRoomRequest = {
@@ -194,5 +206,6 @@ export type JoinRoomResponse = {
   roomCode: string;
   roomName: string;
   challengeId: string;
+  challengeTitle: string;
   displayName: string;
 };

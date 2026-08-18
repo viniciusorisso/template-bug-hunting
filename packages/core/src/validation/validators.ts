@@ -235,3 +235,181 @@ export function validateTaxRounding(context: ValidationContext): ValidationResul
 
   return partial("A regiao esta correta, mas faltou explicar a politica de arredondamento do imposto.");
 }
+
+export function validateProfileIdNonNullAssertion(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para o id opcional.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["validar patch.id", "optional chaining", "fallback", "remover ! do id"],
+      ["patch.id?.trim()", "if (!patch.id?.trim())", "patch.id?.trim() ?? \"\""]
+    )
+  ) {
+    return solved("Correto: patch.id precisa de validacao em runtime antes do trim.");
+  }
+
+  return partial("A regiao esta correta, mas faltou remover a dependencia do non-null assertion em id.");
+}
+
+export function validateProfileEmailNonNullAssertion(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para o email opcional.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["validar patch.email", "remover ! do email", "optional chaining", "fallback"],
+      ["patch.email?.toLowerCase()", "if (!patch.email)", "patch.email?.toLowerCase() ?? \"\""]
+    )
+  ) {
+    return solved("Correto: patch.email pode nao existir e precisa ser tratado sem non-null assertion.");
+  }
+
+  return partial("A selecao esta certa, mas faltou explicar como evitar undefined.toLowerCase().");
+}
+
+export function validateProfileReadonlyAssertionAlias(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para cloneShortcuts.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["clonar array", "readonly", "nao reutilizar referencia", "spread"],
+      ["shortcuts ? [...shortcuts] : []", "return [...shortcuts]", "Array.from(shortcuts)"]
+    )
+  ) {
+    return solved("Correto: trocar assertion por copia evita aliasing e preserva readonly na entrada.");
+  }
+
+  return partial("A regiao esta correta, mas faltou substituir a assertion por uma copia real do array.");
+}
+
+export function validateProfileReadonlyRoleMutation(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para a lista de roles.");
+  }
+
+  const mentionsCopy = matchesTextualOrCode(
+    context.normalizedFix,
+    ["copiar roles", "readonly", "nao mutar entrada", "spread"],
+    ["[...(patch.roles ?? [fallbackRole])]", "const roles = [...(patch.roles ?? [fallbackRole])]", "Array.from(patch.roles ?? [fallbackRole])"]
+  );
+  const mentionsMutation = matchesTextualOrCode(
+    context.normalizedFix,
+    ["sort muta", "mutacao", "side effect"],
+    ["roles.sort()"]
+  );
+
+  if (mentionsCopy && mentionsMutation) {
+    return solved("Correto: a ordenacao precisa acontecer sobre uma copia mutavel, nao sobre a colecao readonly original.");
+  }
+
+  if (mentionsCopy) {
+    return partial("Faltou mencionar que sort muta a colecao e por isso a copia e necessaria.");
+  }
+
+  return partial("A regiao esta correta, mas faltou remover o cast inseguro e copiar a colecao antes de ordenar.");
+}
+
+export function validateProfileSharedDefaultShortcuts(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para o fallback de shortcuts.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["clonar defaultshortcuts", "nao compartilhar array default", "evitar estado global", "spread"],
+      [
+        "[...(cloneShortcuts(patch.preferences?.shortcuts) ?? defaultShortcuts)]",
+        "const shortcuts = [...defaultShortcuts]",
+        "const shortcuts = [...(cloneShortcuts(patch.preferences?.shortcuts) ?? defaultShortcuts)]"
+      ]
+    )
+  ) {
+    return solved("Correto: a lista usada no push precisa ser uma copia para nao contaminar o default compartilhado.");
+  }
+
+  return partial("A regiao esta correta, mas faltou isolar o array default antes do push.");
+}
+
+export function validateProfilePreferencesAssertion(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para preferences.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["optional chaining", "preferences pode nao existir", "fallback light", "remover required"],
+      [
+        "patch.preferences?.theme ?? \"light\"",
+        "patch.preferences?.theme || \"light\"",
+        "const theme = patch.preferences?.theme ?? \"light\""
+      ]
+    )
+  ) {
+    return solved("Correto: o tipo Required nao garante a presenca de preferences em runtime.");
+  }
+
+  return partial("A selecao esta correta, mas faltou trocar a assertion por um acesso opcional com fallback.");
+}
+
+export function validateProfileMetadataAssertion(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para analyticsId.");
+  }
+
+  if (
+    matchesTextualOrCode(
+      context.normalizedFix,
+      ["optional chaining", "metadata pode nao existir", "analyticsid opcional", "fallback vazio"],
+      [
+        "(patch.metadata?.analyticsId ?? \"\").trim()",
+        "patch.metadata?.analyticsId?.trim() ?? \"\"",
+        "const analyticsId = (patch.metadata?.analyticsId ?? \"\").trim()"
+      ]
+    )
+  ) {
+    return solved("Correto: analyticsId precisa ser lido de forma segura, sem depender da assertion anterior.");
+  }
+
+  return partial("A regiao esta correta, mas faltou proteger o acesso a metadata.analyticsId.");
+}
+
+export function validateProfileNotificationExhaustiveness(context: ValidationContext): ValidationResult {
+  if (!rangeIntersects(context.selection, context.bug.expectedRange)) {
+    return incorrect("A selecao nao aponta para o switch da notificacao.");
+  }
+
+  const mentionsPush = matchesTextualOrCode(
+    context.normalizedFix,
+    ["caso push", "switch exaustivo", "union discriminada", "notification.token"],
+    [
+      "case \"push\": return notification.token;",
+      "case 'push': return notification.token;",
+      "return notification.token"
+    ]
+  );
+  const mentionsAddressBug = matchesTextualOrCode(
+    context.normalizedFix,
+    ["push nao tem address", "campo errado", "default incorreto"],
+    ["notification.address"]
+  );
+
+  if (mentionsPush && mentionsAddressBug) {
+    return solved("Correto: o ramo restante da union e push, entao o switch precisa tratar notification.token explicitamente.");
+  }
+
+  if (mentionsPush) {
+    return partial("Faltou explicar por que o default atual esta errado para a union discriminada.");
+  }
+
+  return partial("A regiao esta correta, mas faltou tratar explicitamente o caso push da union.");
+}
