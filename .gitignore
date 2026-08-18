@@ -3,4 +3,4 @@ dist
 .turbo
 coverage
 .DS_Store
-
+docs

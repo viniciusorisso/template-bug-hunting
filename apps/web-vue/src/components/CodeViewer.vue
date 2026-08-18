@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { CodeRange, ResolvedBugDiff } from "@ts-bug-hunt/core";
 import { getTokenClass, tokenizeTsLine } from "../lib/tokenizeTs";
 
@@ -12,6 +12,7 @@ const props = defineProps<{
   source: string;
   selectedRange: CodeRange | null;
   resolvedBugDiffs?: Record<string, ResolvedBugDiff>;
+  highlightedBugId?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -22,6 +23,9 @@ const emit = defineEmits<{
 const lines = computed(() => props.source.split("\n"));
 const focusedLine = ref(props.selectedRange?.startLine ?? 1);
 const keyboardAnchorLine = ref<number | null>(null);
+const viewerRef = ref<HTMLElement | null>(null);
+const hoveredLineNumber = ref<number | null>(null);
+const activePopoverDiffIndex = ref(0);
 const lineDiffMap = computed(() => {
   const map = new Map<number, ResolvedBugDiff[]>();
 
@@ -51,6 +55,28 @@ watch(
     }
   },
   { immediate: true }
+);
+
+watch(
+  () => props.highlightedBugId,
+  async (bugId) => {
+    if (!bugId) {
+      return;
+    }
+
+    const diff = props.resolvedBugDiffs?.[bugId];
+
+    if (!diff) {
+      return;
+    }
+
+    focusedLine.value = diff.appliedRange.startLine;
+    await nextTick();
+    viewerRef.value?.focus();
+    viewerRef.value
+      ?.querySelector<HTMLElement>(`[data-line="${diff.appliedRange.startLine}"]`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
 );
 
 function handleMouseUp(): void {
@@ -92,6 +118,8 @@ function handleKeyboardSelection(event: KeyboardEvent): void {
 
   if (event.key === "Escape") {
     keyboardAnchorLine.value = null;
+    hoveredLineNumber.value = null;
+    activePopoverDiffIndex.value = 0;
     emit("clear-selection");
     return;
   }
@@ -112,6 +140,14 @@ function handleKeyboardSelection(event: KeyboardEvent): void {
   event.preventDefault();
   const previousLine = focusedLine.value;
   focusedLine.value = movement;
+
+  if (getResolvedDiffsForLine(focusedLine.value).length > 0) {
+    hoveredLineNumber.value = focusedLine.value;
+    activePopoverDiffIndex.value = 0;
+  } else {
+    hoveredLineNumber.value = null;
+    activePopoverDiffIndex.value = 0;
+  }
 
   if (event.shiftKey) {
     keyboardAnchorLine.value ??= previousLine;
@@ -240,19 +276,70 @@ function getResolvedDiffsForLine(lineNumber: number): ResolvedBugDiff[] {
   return lineDiffMap.value.get(lineNumber) ?? [];
 }
 
-function getResolvedTooltip(lineNumber: number): string | undefined {
-  const [firstDiff] = getResolvedDiffsForLine(lineNumber);
-
-  if (!firstDiff) {
-    return undefined;
+function isLineHighlighted(lineNumber: number): boolean {
+  if (!props.highlightedBugId) {
+    return false;
   }
 
-  return `${firstDiff.bugId}\nAntes: ${firstDiff.beforeText}\nDepois: ${firstDiff.afterText}`;
+  return getResolvedDiffsForLine(lineNumber).some((diff) => diff.bugId === props.highlightedBugId);
+}
+
+function isPopoverVisible(lineNumber: number): boolean {
+  return hoveredLineNumber.value === lineNumber && getResolvedDiffsForLine(lineNumber).length > 0;
+}
+
+function setHoveredBug(lineNumber: number): void {
+  if (getResolvedDiffsForLine(lineNumber).length === 0) {
+    hoveredLineNumber.value = null;
+    activePopoverDiffIndex.value = 0;
+    return;
+  }
+
+  hoveredLineNumber.value = lineNumber;
+  activePopoverDiffIndex.value = 0;
+}
+
+function clearHoveredBug(lineNumber: number): void {
+  if (hoveredLineNumber.value === lineNumber) {
+    hoveredLineNumber.value = null;
+    activePopoverDiffIndex.value = 0;
+  }
+}
+
+function getActiveResolvedDiff(lineNumber: number): ResolvedBugDiff | null {
+  const diffs = getResolvedDiffsForLine(lineNumber);
+
+  if (diffs.length === 0) {
+    return null;
+  }
+
+  return diffs[activePopoverDiffIndex.value] ?? diffs[0] ?? null;
+}
+
+function showPreviousResolvedDiff(lineNumber: number): void {
+  const diffs = getResolvedDiffsForLine(lineNumber);
+
+  if (diffs.length <= 1) {
+    return;
+  }
+
+  activePopoverDiffIndex.value = (activePopoverDiffIndex.value - 1 + diffs.length) % diffs.length;
+}
+
+function showNextResolvedDiff(lineNumber: number): void {
+  const diffs = getResolvedDiffsForLine(lineNumber);
+
+  if (diffs.length <= 1) {
+    return;
+  }
+
+  activePopoverDiffIndex.value = (activePopoverDiffIndex.value + 1) % diffs.length;
 }
 </script>
 
 <template>
   <div
+    ref="viewerRef"
     class="code-viewer"
     tabindex="0"
     role="region"
@@ -274,12 +361,16 @@ function getResolvedTooltip(lineNumber: number): string | undefined {
         {
           'code-line-selected': isLineSelected(index + 1),
           'code-line-focused': focusedLine === index + 1,
-          'code-line-resolved': getResolvedDiffsForLine(index + 1).length > 0
+          'code-line-resolved': getResolvedDiffsForLine(index + 1).length > 0,
+          'code-line-highlighted': isLineHighlighted(index + 1)
         }
       ]"
       :data-line="index + 1"
       :data-resolved-bugs="getResolvedDiffsForLine(index + 1).map((diff) => diff.bugId).join(',')"
-      :title="getResolvedTooltip(index + 1)"
+      @mouseenter="setHoveredBug(index + 1)"
+      @mouseleave="clearHoveredBug(index + 1)"
+      @focusin="setHoveredBug(index + 1)"
+      @focusout="clearHoveredBug(index + 1)"
     >
       <span :class="['line-number', { 'line-number-resolved': getResolvedDiffsForLine(index + 1).length > 0 }]">
         {{ index + 1 }}
@@ -293,6 +384,34 @@ function getResolvedTooltip(lineNumber: number): string | undefined {
           {{ token.value }}
         </span>
       </code>
+      <div
+        v-if="isPopoverVisible(index + 1) && getActiveResolvedDiff(index + 1)"
+        class="resolved-popover"
+        role="note"
+        aria-live="polite"
+      >
+        <div class="resolved-popover-header">
+          <strong>{{ getActiveResolvedDiff(index + 1)?.bugId }}</strong>
+          <span class="metric-label">Trecho resolvido</span>
+        </div>
+        <div v-if="getResolvedDiffsForLine(index + 1).length > 1" class="resolved-popover-nav">
+          <button type="button" class="popover-nav-button" @click="showPreviousResolvedDiff(index + 1)">Anterior</button>
+          <span class="metric-label">
+            {{ activePopoverDiffIndex + 1 }}/{{ getResolvedDiffsForLine(index + 1).length }}
+          </span>
+          <button type="button" class="popover-nav-button" @click="showNextResolvedDiff(index + 1)">Proximo</button>
+        </div>
+        <div class="resolved-popover-grid">
+          <div>
+            <span class="metric-label">Antes</span>
+            <pre class="resolved-popover-code"><code>{{ getActiveResolvedDiff(index + 1)?.beforeText }}</code></pre>
+          </div>
+          <div>
+            <span class="metric-label">Depois</span>
+            <pre class="resolved-popover-code"><code>{{ getActiveResolvedDiff(index + 1)?.afterText }}</code></pre>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>

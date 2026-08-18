@@ -3,6 +3,12 @@ import type { SessionProgress } from "../types.js";
 export class InMemorySessionStore {
   private sessions = new Map<string, SessionProgress>();
 
+  constructor(initial: SessionProgress[] = []) {
+    for (const progress of initial) {
+      this.save(progress);
+    }
+  }
+
   get(sessionId: string, challengeId: string): SessionProgress | undefined {
     return this.sessions.get(this.getKey(sessionId, challengeId));
   }
@@ -28,6 +34,10 @@ export class InMemorySessionStore {
 
   save(progress: SessionProgress): void {
     this.sessions.set(this.getKey(progress.sessionId, progress.challengeId), progress);
+  }
+
+  list(): SessionProgress[] {
+    return [...this.sessions.values()];
   }
 
   delete(sessionId: string, challengeId: string): boolean {
