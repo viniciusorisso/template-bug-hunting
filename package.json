@@ -1,0 +1,25 @@
+{
+  "name": "ts-bug-hunt",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.5.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "pnpm --filter @ts-bug-hunt/web-vue dev",
+    "dev:api": "pnpm --filter @ts-bug-hunt/api dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down",
+    "docker:build": "docker-compose build --no-cache",
+    "docker:dev": "docker-compose -f docker-compose.dev.yml up --build",
+    "docker:dev:down": "docker-compose -f docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

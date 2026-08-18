@@ -1,0 +1,198 @@
+export type Difficulty = "easy" | "medium" | "hard";
+
+export type SubmissionStatus = "solved" | "partial" | "duplicate" | "incorrect";
+
+export type CodeRange = {
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+};
+
+export type BugPatch = {
+  range: CodeRange;
+  replacement: string;
+};
+
+export type ResolvedBugDiff = {
+  bugId: string;
+  originalRange: CodeRange;
+  appliedRange: CodeRange;
+  beforeText: string;
+  afterText: string;
+  resolvedLineIds: string[];
+};
+
+export type SubmissionAttempt = {
+  challengeId: string;
+  bugId?: string;
+  selection: CodeRange;
+  proposedFix: string;
+  status: SubmissionStatus;
+  createdAt: string;
+};
+
+export type SessionProgress = {
+  sessionId: string;
+  challengeId: string;
+  solvedBugIds: string[];
+  attempts: SubmissionAttempt[];
+};
+
+export type BugValidationTestId =
+  | "CHECKOUT_001_USER_ID_GUARD"
+  | "CHECKOUT_002_ITEM_LOOP_BOUNDARY"
+  | "CHECKOUT_003_COUPON_CODE_NORMALIZATION"
+  | "CHECKOUT_004_EXPIRATION_DIRECTION"
+  | "CHECKOUT_005_OPTIONAL_PLAN_RULE"
+  | "CHECKOUT_006_MAX_USES_BOUNDARY"
+  | "CHECKOUT_007_ASSIGNMENT_IN_CONDITION"
+  | "CHECKOUT_008_MONEY_ROUNDING"
+  | "CHECKOUT_009_INPUT_MUTATION"
+  | "CHECKOUT_010_TAX_ROUNDING";
+
+export type BugDefinition = {
+  id: string;
+  title: string;
+  category: string;
+  difficulty: Difficulty;
+  expectedRange: CodeRange;
+  testId: BugValidationTestId;
+  expectedFix: string;
+  technicalBasis: string;
+  patch: BugPatch;
+};
+
+export type ChallengeDefinition = {
+  id: string;
+  title: string;
+  language: "typescript";
+  source: string;
+  bugs: BugDefinition[];
+};
+
+export type ChallengeStateResponse = {
+  challengeId: string;
+  baseSource: string;
+  resolvedBugOrder: string[];
+  resolvedBugDiffs: Record<string, ResolvedBugDiff>;
+  displayedSource: string;
+};
+
+export type ValidationContext = {
+  bug: BugDefinition;
+  selection: CodeRange;
+  proposedFix: string;
+  normalizedFix: string;
+  sessionProgress: SessionProgress;
+};
+
+export type ValidationResult = {
+  status: Exclude<SubmissionStatus, "duplicate">;
+  feedback: string;
+};
+
+export type SubmitBugRequest = {
+  challengeId: string;
+  sessionId: string;
+  selection: CodeRange;
+  proposedFix: string;
+  roomCode?: string;
+  participantName?: string;
+};
+
+export type SubmitBugResponse = {
+  accepted: boolean;
+  status: SubmissionStatus;
+  bugId?: string;
+  feedback: string;
+  technicalBasis?: string;
+  resolvedBugIds: string[];
+  resolvedBugDiff?: ResolvedBugDiff;
+};
+
+export type ResolvedBugEvent = {
+  type: "bug.resolved";
+  challengeId: string;
+  sessionId: string;
+  bugId: string;
+  title: string;
+  resolvedAt: string;
+  diff: ResolvedBugDiff;
+  shortDescription: string;
+};
+
+export type RoomStatus = "active" | "deleted";
+
+export type Room = {
+  id: string;
+  name: string;
+  roomCode: string;
+  passwordHash: string;
+  status: RoomStatus;
+  createdAt: string;
+  deletedAt?: string;
+};
+
+export type RoomSummary = Omit<Room, "passwordHash">;
+
+export type ParticipantSession = {
+  id: string;
+  roomCode: string;
+  displayName: string;
+  joinedAt: string;
+};
+
+export type RoomActivityItem = {
+  id: string;
+  roomCode: string;
+  challengeId: string;
+  bugId?: string;
+  status: SubmissionStatus;
+  submittedBy: string;
+  submittedAt: string;
+  proposedFix: string;
+};
+
+export type RoomActivityResponse = {
+  roomCode: string;
+  items: RoomActivityItem[];
+};
+
+export type RoomActivityEvent = {
+  type: "room.activity";
+  roomCode: string;
+  item: RoomActivityItem;
+};
+
+export type AdminStatusResponse = {
+  requiresBootstrap: boolean;
+};
+
+export type AdminAuthRequest = {
+  username?: string;
+  password: string;
+};
+
+export type AdminAuthResponse = {
+  token: string;
+  username: "admin";
+};
+
+export type CreateRoomRequest = {
+  name: string;
+  password: string;
+};
+
+export type JoinRoomRequest = {
+  roomCode: string;
+  displayName: string;
+};
+
+export type JoinRoomResponse = {
+  participantSessionId: string;
+  roomCode: string;
+  roomName: string;
+  challengeId: string;
+  displayName: string;
+};
