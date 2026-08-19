@@ -23,3 +23,14 @@ test("projectResolvedSource preserva source original quando nao ha bugs resolvid
   assert.equal(projection.displayedSource, checkoutChallenge.source);
   assert.deepEqual(projection.resolvedBugDiffs, {});
 });
+
+test("projectResolvedSource preserva offsets quando bugs sao resolvidos fora da ordem do codigo", () => {
+  const projection = projectResolvedSource(checkoutChallenge, ["B010", "B002"]);
+
+  assert.equal(
+    projection.displayedSource.split("\n")[34],
+    "  for (let i = 0; i < input.items.length; i++) {"
+  );
+  assert.equal(projection.resolvedBugDiffs.B002?.appliedRange.startLine, 35);
+  assert.equal(projection.resolvedBugDiffs.B010?.appliedRange.startLine, 64);
+});

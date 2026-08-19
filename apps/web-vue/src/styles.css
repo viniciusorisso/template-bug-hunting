@@ -163,7 +163,8 @@ p {
 }
 
 .editor-panel {
-  height: 1120px;
+  height: min(1120px, calc(100dvh - 48px));
+  min-height: 560px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -521,7 +522,8 @@ button:disabled {
   }
 
   .editor-panel {
-    height: 1040px;
+    height: min(1040px, calc(100dvh - 32px));
+    min-height: 480px;
   }
 
   .editor-toolbar,
@@ -788,6 +790,7 @@ button:disabled {
 
 .code-viewer {
   position: relative;
+  overscroll-behavior: contain;
   overflow: hidden;
   gap: 0;
   padding: 0;
@@ -796,6 +799,10 @@ button:disabled {
 .monaco-host {
   height: 100%;
   min-height: 0;
+}
+
+.code-viewer .monaco-scrollable-element {
+  overscroll-behavior: contain;
 }
 
 .code-viewer .monaco-editor,

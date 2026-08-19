@@ -202,6 +202,9 @@ function initializeEditor(): void {
     renderLineHighlight: "all",
     renderWhitespace: "selection",
     scrollBeyondLastLine: false,
+    scrollbar: {
+      alwaysConsumeMouseWheel: true
+    },
     selectionHighlight: false,
     occurrencesHighlight: "off",
     wordWrap: "off",

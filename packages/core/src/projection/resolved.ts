@@ -11,7 +11,7 @@ export function projectResolvedSource(
 ): ResolvedSourceProjection {
   let displayedSource = challenge.source;
   const resolvedBugDiffs: Record<string, ResolvedBugDiff> = {};
-  let offsetDelta = 0;
+  const appliedPatches: AppliedPatch[] = [];
 
   for (const bugId of resolvedBugOrder) {
     const bug = challenge.bugs.find((candidate) => candidate.id === bugId);
@@ -22,8 +22,8 @@ export function projectResolvedSource(
 
     const originalStartOffset = getOffsetFromRange(challenge.source, bug.patch.range, "start");
     const originalEndOffset = getOffsetFromRange(challenge.source, bug.patch.range, "end");
-    const appliedStartOffset = originalStartOffset + offsetDelta;
-    const appliedEndOffset = originalEndOffset + offsetDelta;
+    const appliedStartOffset = originalStartOffset + getOffsetDeltaAt(originalStartOffset, appliedPatches);
+    const appliedEndOffset = originalEndOffset + getOffsetDeltaAt(originalEndOffset, appliedPatches);
     const beforeText = displayedSource.slice(appliedStartOffset, appliedEndOffset);
     const afterText = bug.patch.replacement;
 
@@ -46,13 +46,30 @@ export function projectResolvedSource(
       resolvedLineIds
     };
 
-    offsetDelta += afterText.length - (originalEndOffset - originalStartOffset);
+    appliedPatches.push({
+      originalStartOffset,
+      originalEndOffset,
+      offsetDelta: afterText.length - (originalEndOffset - originalStartOffset)
+    });
   }
 
   return {
     displayedSource,
     resolvedBugDiffs
   };
+}
+
+type AppliedPatch = {
+  originalStartOffset: number;
+  originalEndOffset: number;
+  offsetDelta: number;
+};
+
+function getOffsetDeltaAt(offset: number, patches: AppliedPatch[]): number {
+  return patches.reduce(
+    (delta, patch) => delta + (patch.originalEndOffset <= offset ? patch.offsetDelta : 0),
+    0
+  );
 }
 
 function getOffsetFromRange(source: string, range: CodeRange, edge: "start" | "end"): number {

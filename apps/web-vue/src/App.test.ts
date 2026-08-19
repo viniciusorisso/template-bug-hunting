@@ -1028,6 +1028,46 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Resposta protegida para evitar vazamento.");
     expect(wrapper.text()).not.toContain("Trocar <= por <.");
   });
+
+  it("refreshes room state for a second client that shares the author session", async () => {
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
+    let challengeStateRequestCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) return createJsonResponse([challenge]);
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) return createJsonResponse(challenge);
+        if (input.includes(challengeStatePath)) {
+          challengeStateRequestCount += 1;
+          return createJsonResponse(challengeStateRequestCount > 1 ? resolvedCouponState : emptyChallengeState);
+        }
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) return createJsonResponse(initialProgress);
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "bug.resolved",
+      challengeId: challenge.id,
+      sessionId: "session-1",
+      bugId: "B003",
+      title: "Cupom resolvido",
+      resolvedAt: "2026-08-18T00:00:00.000Z",
+      diff: resolvedCouponDiff,
+      shortDescription: ""
+    });
+    await flushPromises();
+
+    expect(challengeStateRequestCount).toBe(2);
+    expect(wrapper.find(".code-viewer .monaco-editor").text()).toContain("candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()");
+    expect(document.body.querySelector(".celebration-balloon")).toBeNull();
+  });
+
 });
 
 function createJsonResponse(payload: unknown, init?: { status?: number }): Response {

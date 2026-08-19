@@ -103,28 +103,30 @@ export function validateSubmission(
     };
   }
 
-  const candidate = candidates[0];
+  const responses = candidates.map((candidate) => {
+    if (sessionProgress.solvedBugIds.includes(candidate.id)) {
+      return {
+        accepted: false,
+        status: "duplicate" as const,
+        bugId: candidate.id,
+        feedback: "Esse bug ja foi resolvido nesta sessao.",
+        technicalBasis: candidate.technicalBasis,
+        resolvedBugIds: sessionProgress.solvedBugIds
+      };
+    }
 
-  if (sessionProgress.solvedBugIds.includes(candidate.id)) {
-    return {
-      accepted: false,
-      status: "duplicate",
-      bugId: candidate.id,
-      feedback: "Esse bug ja foi resolvido nesta sessao.",
-      technicalBasis: candidate.technicalBasis,
-      resolvedBugIds: sessionProgress.solvedBugIds
-    };
-  }
+    const result = runBugValidation(candidate.testId, {
+      bug: candidate,
+      selection: normalizedSelection,
+      proposedFix: request.proposedFix,
+      normalizedFix,
+      sessionProgress
+    });
 
-  const result = runBugValidation(candidate.testId, {
-    bug: candidate,
-    selection: normalizedSelection,
-    proposedFix: request.proposedFix,
-    normalizedFix,
-    sessionProgress
+    return buildResponse(candidate, result, sessionProgress);
   });
 
-  return buildResponse(candidate, result, sessionProgress);
+  return responses.sort((left, right) => getResponsePriority(right.status) - getResponsePriority(left.status))[0]!;
 }
 
 export function appendAttempt(
@@ -153,6 +155,18 @@ export function appendAttempt(
   };
 }
 
+function getResponsePriority(status: SubmitBugResponse["status"]): number {
+  switch (status) {
+    case "solved":
+      return 4;
+    case "partial":
+      return 3;
+    case "duplicate":
+      return 2;
+    case "incorrect":
+      return 1;
+  }
+}
 function buildResponse(
   bug: BugDefinition,
   result: ValidationResult,

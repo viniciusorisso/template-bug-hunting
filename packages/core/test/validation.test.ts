@@ -119,3 +119,16 @@ test("appendAttempt registra tentativa e adiciona bug resolvido uma vez", () => 
   assert.equal(next.attempts.length, 1);
   assert.equal(next.attempts[0]?.status, "solved");
 });
+
+test("validateSubmission seleciona o bug resolvido em uma selecao multilinha", () => {
+  const result = validateSubmission(
+    createRequest({
+      selection: { startLine: 35, startColumn: 1, endLine: 41, endColumn: 62 },
+      proposedFix: "Tratar couponCode ausente sem ! e normalizar candidate.code com trim e uppercase."
+    }),
+    createSessionProgress()
+  );
+
+  assert.equal(result.status, "solved");
+  assert.equal(result.bugId, "B003");
+});
