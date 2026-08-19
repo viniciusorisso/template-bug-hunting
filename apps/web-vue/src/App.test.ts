@@ -115,6 +115,50 @@ describe("App", () => {
     });
   });
 
+  it("allows switching the editor theme and persists the selection", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.includes(challengeStatePath)) {
+          return createJsonResponse(emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+
+    const themeSelect = wrapper.get('select[aria-label="Tema do editor"]');
+    const viewer = wrapper.get('.code-viewer');
+
+    expect((themeSelect.element as HTMLSelectElement).value).toBe('operator-mono-dark-modern');
+    expect(viewer.attributes('data-editor-theme')).toBe('operator-mono-dark-modern');
+
+    await themeSelect.setValue('classic-dark');
+
+    expect(window.localStorage.getItem('ts-bug-hunt.editor-theme')).toBe('classic-dark');
+    expect(wrapper.get('.code-viewer').attributes('data-editor-theme')).toBe('classic-dark');
+  });
+
   it("loads the challenge, challenge-state and session progress", async () => {
     vi.stubGlobal("EventSource", createEventSourceStub());
     vi.stubGlobal(

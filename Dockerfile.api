@@ -15,6 +15,7 @@ ENV NODE_ENV=production
 ENV PORT=3001
 
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
+RUN npm install --omit=dev --no-save typescript@5.9.2
 RUN mkdir -p ./node_modules/@ts-bug-hunt/core
 COPY --from=builder /app/apps/api/dist/packages/core/src/ ./node_modules/@ts-bug-hunt/core/
 RUN printf '{"name":"@ts-bug-hunt/core","type":"module","main":"./index.js"}\n' > ./node_modules/@ts-bug-hunt/core/package.json

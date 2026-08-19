@@ -4,6 +4,7 @@ import { getTokenClass, tokenizeTsLine } from "../lib/tokenizeTs";
 
 const props = defineProps<{
   open: boolean;
+  theme?: string;
   rangeLabel: string;
   submitting: boolean;
   value: string;
@@ -75,7 +76,7 @@ function syncScroll(event: Event): void {
 
           <label class="textarea-field">
             <span>Correcao proposta</span>
-            <div class="highlight-input">
+            <div class="highlight-input" :data-editor-theme="theme ?? 'operator-mono-dark-modern'">
               <pre aria-hidden="true" class="highlight-layer" data-highlight-layer><code class="code-content modal-code-content"><template v-for="(line, lineIndex) in highlightedLines" :key="lineIndex"><span
                     v-for="(token, tokenIndex) in tokenizeTsLine(line)"
                     :key="`${lineIndex}-${tokenIndex}`"

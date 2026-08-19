@@ -10,6 +10,7 @@ type SelectionPayload = {
 
 const props = defineProps<{
   source: string;
+  theme?: string;
   selectedRange: CodeRange | null;
   resolvedBugDiffs?: Record<string, ResolvedBugDiff>;
   highlightedBugId?: string | null;
@@ -341,6 +342,7 @@ function showNextResolvedDiff(lineNumber: number): void {
   <div
     ref="viewerRef"
     class="code-viewer"
+    :data-editor-theme="theme ?? 'operator-mono-dark-modern'"
     tabindex="0"
     role="region"
     aria-label="Editor somente leitura do desafio"

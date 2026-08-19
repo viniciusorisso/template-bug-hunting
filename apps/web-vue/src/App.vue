@@ -49,10 +49,17 @@ type CelebrationBalloonState = {
   expiresAt: string;
 };
 
+type EditorThemeId = "classic-dark" | "operator-mono-dark-modern";
+
 const defaultApiBaseUrl = import.meta.env.DEV ? "http://localhost:3001" : "";
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? defaultApiBaseUrl).replace(/\/$/, "");
 const adminTokenStorageKey = "ts-bug-hunt.admin-token";
+const editorThemeStorageKey = "ts-bug-hunt.editor-theme";
 const celebrationDurationMs = 4000;
+const editorThemes: Array<{ id: EditorThemeId; label: string }> = [
+  { id: "operator-mono-dark-modern", label: "Operator Mono Dark Modern" },
+  { id: "classic-dark", label: "Classic Dark" }
+];
 
 const route = ref<RouteState>(readRoute());
 const availableChallenges = ref<ChallengeDefinition[]>([]);
@@ -81,6 +88,7 @@ const highlightedBugId = ref<string | null>(null);
 const latestResolvedBug = ref<ResolvedBugEvent | null>(null);
 const resolvedBugHistory = ref<ResolvedBugEvent[]>([]);
 const selectedResolvedHistoryBugId = ref<string | null>(null);
+const editorTheme = ref<EditorThemeId>(readStoredEditorTheme());
 
 const form = reactive({
   proposedFix: ""
@@ -209,6 +217,29 @@ onBeforeUnmount(() => {
 function handlePopState(): void {
   route.value = readRoute();
   void initializeCurrentView();
+}
+
+function readStoredEditorTheme(): EditorThemeId {
+  if (typeof window === "undefined") {
+    return "operator-mono-dark-modern";
+  }
+
+  const storedTheme = window.localStorage.getItem(editorThemeStorageKey);
+
+  return editorThemes.some((theme) => theme.id === storedTheme)
+    ? (storedTheme as EditorThemeId)
+    : "operator-mono-dark-modern";
+}
+
+function handleEditorThemeChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value;
+
+  if (!editorThemes.some((theme) => theme.id === value)) {
+    return;
+  }
+
+  editorTheme.value = value as EditorThemeId;
+  window.localStorage.setItem(editorThemeStorageKey, editorTheme.value);
 }
 
 function handleWindowKeydown(event: KeyboardEvent): void {
@@ -1276,6 +1307,14 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
                 <strong>{{ selectedRangeLabel }}</strong>
               </div>
               <div class="toolbar-actions">
+                <label class="theme-select-field">
+                  <span class="selection-label">Tema</span>
+                  <select :value="editorTheme" aria-label="Tema do editor" @change="handleEditorThemeChange">
+                    <option v-for="themeOption in editorThemes" :key="themeOption.id" :value="themeOption.id">
+                      {{ themeOption.label }}
+                    </option>
+                  </select>
+                </label>
                 <button
                   :disabled="!selectedRange"
                   class="secondary-button toolbar-button"
@@ -1291,6 +1330,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
             </div>
 
             <CodeViewer
+              :theme="editorTheme"
               :selected-range="selectedRange"
               :resolved-bug-diffs="challengeDisplayState.resolvedBugDiffs"
               :highlighted-bug-id="highlightedBugId"
@@ -1422,6 +1462,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
 
     <SubmissionModal
       :error-message="submissionError"
+      :theme="editorTheme"
       :open="modalOpen"
       :range-label="selectedRangeLabel"
       :submitting="submitting"
