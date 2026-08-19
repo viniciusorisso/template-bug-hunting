@@ -300,7 +300,12 @@ function syncSelection(range: CodeRange | null): void {
     normalizedRange.endColumn
   );
 
-  if (editor.getSelection()?.equalsSelection(selection)) {
+  const currentSelection = editor.getSelection();
+
+  if (
+    currentSelection &&
+    rangesEqual(normalizeRange(selectionToRange(currentSelection)), normalizedRange)
+  ) {
     return;
   }
 
@@ -341,6 +346,22 @@ function emitSelection(selection: Monaco.Selection): void {
       endColumn: range.endColumn
     })
   });
+}
+
+function selectionToRange(selection: Monaco.Selection): CodeRange {
+  return {
+    startLine: selection.startLineNumber,
+    startColumn: selection.startColumn,
+    endLine: selection.endLineNumber,
+    endColumn: selection.endColumn
+  };
+}
+
+function rangesEqual(left: CodeRange, right: CodeRange): boolean {
+  return left.startLine === right.startLine
+    && left.startColumn === right.startColumn
+    && left.endLine === right.endLine
+    && left.endColumn === right.endColumn;
 }
 
 function selectFocusedLine(): void {

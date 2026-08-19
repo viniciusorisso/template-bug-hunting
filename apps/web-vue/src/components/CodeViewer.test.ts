@@ -51,6 +51,17 @@ describe("CodeViewer", () => {
       },
       text: "bcde"
     });
+
+    await wrapper.setProps({
+      selectedRange: {
+        startLine: 1,
+        startColumn: 2,
+        endLine: 1,
+        endColumn: 6
+      }
+    });
+
+    expect(getLastMockEditor().revealRangeInCenter).not.toHaveBeenCalled();
   });
 
   it("selects the focused line when Enter is pressed", async () => {
