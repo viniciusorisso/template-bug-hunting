@@ -17,9 +17,9 @@ describe("SubmissionModal", () => {
     });
 
     await flushPromises();
-    getLastMockEditor().triggerContent("Nova correcao");
+    getLastMockEditor().triggerContent("Nova  correcao\n  com indentacao");
 
-    expect(wrapper.emitted("update:value")?.[0]).toEqual(["Nova correcao"]);
+    expect(wrapper.emitted("update:value")?.[0]).toEqual(["Nova  correcao\n  com indentacao"]);
   });
 
   it("emits submit on Ctrl+Enter when there is content", async () => {

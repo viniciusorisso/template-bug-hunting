@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type * as Monaco from "monaco-editor";
-import type { CodeRange, ResolvedBugDiff } from "@ts-bug-hunt/core";
+import { normalizeRange, type CodeRange, type ResolvedBugDiff } from "@ts-bug-hunt/core";
 import { ensureMonacoSetup, resolveMonacoTheme } from "@/lib/monaco";
 
 type SelectionPayload = {
@@ -292,7 +292,13 @@ function syncSelection(range: CodeRange | null): void {
     return;
   }
 
-  const selection = new monaco.Selection(range.startLine, range.startColumn, range.endLine, range.endColumn);
+  const normalizedRange = normalizeRange(range);
+  const selection = new monaco.Selection(
+    normalizedRange.startLine,
+    normalizedRange.startColumn,
+    normalizedRange.endLine,
+    normalizedRange.endColumn
+  );
 
   if (editor.getSelection()?.equalsSelection(selection)) {
     return;
@@ -319,14 +325,21 @@ function emitSelection(selection: Monaco.Selection): void {
     return;
   }
 
+  const range = normalizeRange({
+    startLine: selection.startLineNumber,
+    startColumn: selection.startColumn,
+    endLine: selection.endLineNumber,
+    endColumn: selection.endColumn
+  });
+
   emit("range-selected", {
-    range: {
-      startLine: selection.startLineNumber,
-      startColumn: selection.startColumn,
-      endLine: selection.endLineNumber,
-      endColumn: selection.endColumn
-    },
-    text: model.getValueInRange(selection)
+    range,
+    text: model.getValueInRange({
+      startLineNumber: range.startLine,
+      startColumn: range.startColumn,
+      endLineNumber: range.endLine,
+      endColumn: range.endColumn
+    })
   });
 }
 

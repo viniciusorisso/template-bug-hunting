@@ -30,6 +30,29 @@ describe("CodeViewer", () => {
     });
   });
 
+  it("normalizes a reversed single-line selection before emitting", async () => {
+    const wrapper = mount(CodeViewer, {
+      props: {
+        source: "abcdef",
+        selectedRange: null
+      },
+      attachTo: document.body
+    });
+
+    await flushPromises();
+    getLastMockEditor().triggerSelection(createMockSelection(1, 6, 1, 2));
+
+    expect(wrapper.emitted("range-selected")?.[0]?.[0]).toEqual({
+      range: {
+        startLine: 1,
+        startColumn: 2,
+        endLine: 1,
+        endColumn: 6
+      },
+      text: "bcde"
+    });
+  });
+
   it("selects the focused line when Enter is pressed", async () => {
     const wrapper = mount(CodeViewer, {
       props: {
