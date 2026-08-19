@@ -13,7 +13,10 @@ import type {
   RoomActivityEvent,
   RoomActivityItem,
   RoomActivityResponse,
+  RoomExecutionSettings,
+  RoomRunResponse,
   RoomSummary,
+  RoomTypecheckResponse,
   SessionProgress,
   SubmitBugResponse
 } from "@ts-bug-hunt/core";
@@ -37,6 +40,7 @@ type ParsedRoomContext = {
   participantName: string;
   challengeId: string;
   sessionId: string;
+  executionSettings: Required<RoomExecutionSettings>;
 };
 
 type CelebrationBalloonState = {
@@ -126,6 +130,14 @@ const hintState = reactive({
   currentHint: null as RequestHintResponse | null
 });
 
+const executionState = reactive({
+  typechecking: false,
+  running: false,
+  error: "",
+  typecheckResult: null as RoomTypecheckResponse | null,
+  runResult: null as RoomRunResponse | null
+});
+
 const progress = computed(() => {
   const solved = sessionProgress.value?.solvedBugIds.length ?? 0;
   const total = challenge.value?.bugs.length ?? 0;
@@ -167,6 +179,13 @@ const selectedRangeLabel = computed(() => {
   return `L${startLine}:C${startColumn} ate L${endLine}:C${endColumn}`;
 });
 
+function normalizeExecutionSettings(settings?: RoomExecutionSettings): Required<RoomExecutionSettings> {
+  return {
+    allowTypecheck: settings?.allowTypecheck ?? false,
+    allowRuntimeExecution: settings?.allowRuntimeExecution ?? false
+  };
+}
+
 function parseRoomContext(search: string): ParsedRoomContext {
   const params = new URLSearchParams(search);
   const roomCode = params.get("roomCode")?.trim().toUpperCase() ?? "";
@@ -181,7 +200,11 @@ function parseRoomContext(search: string): ParsedRoomContext {
     participantId,
     participantName,
     challengeId,
-    sessionId: participantId || getOrCreateSessionId()
+    sessionId: participantId || getOrCreateSessionId(),
+    executionSettings: normalizeExecutionSettings({
+      allowTypecheck: params.get("allowTypecheck") === "1",
+      allowRuntimeExecution: params.get("allowRuntimeExecution") === "1"
+    })
   };
 }
 
@@ -189,6 +212,7 @@ const roomContext = computed(() => parseRoomContext(route.value.search));
 const currentChallengeId = computed(() => roomContext.value.challengeId);
 const hasRoomAccess = computed(() => Boolean(roomContext.value.roomCode && roomContext.value.participantId && currentChallengeId.value));
 const currentChallengeSummary = computed(() => availableChallenges.value.find((item) => item.id === currentChallengeId.value) ?? challenge.value);
+const roomExecutionSettings = computed(() => normalizeExecutionSettings(roomContext.value.executionSettings));
 
 const notifier = new BrowserBannerResolvedBugNotifier((banner) => {
   notification.value = banner;
@@ -791,7 +815,9 @@ async function joinRoom(): Promise<void> {
       roomName: response.roomName,
       participantSessionId: response.participantSessionId,
       participantName: response.displayName,
-      challengeId: response.challengeId
+      challengeId: response.challengeId,
+      allowTypecheck: response.executionSettings?.allowTypecheck ? "1" : "0",
+      allowRuntimeExecution: response.executionSettings?.allowRuntimeExecution ? "1" : "0"
     });
     navigate(`/?${params.toString()}`);
   } catch (error) {
@@ -851,6 +877,81 @@ async function requestHint(): Promise<void> {
     hintState.error = getErrorMessage(error, "Nao foi possivel carregar a dica.");
   } finally {
     hintState.requesting = false;
+  }
+}
+
+async function updateRoomExecutionSettings(roomCode: string, settings: Partial<Required<RoomExecutionSettings>>): Promise<void> {
+  adminState.loading = true;
+  adminState.error = "";
+
+  try {
+    await requestJson("/api/admin/rooms/" + roomCode + "/execution-settings", {
+      method: "PATCH",
+      headers: {
+        Authorization: "Bearer " + adminState.token,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(settings)
+    });
+    await loadAdminState();
+  } catch (error) {
+    adminState.error = handleAdminError(error, "Nao foi possivel atualizar as permissoes de execucao da sala.");
+  } finally {
+    adminState.loading = false;
+  }
+}
+
+async function runTypecheckRequest(): Promise<void> {
+  if (!currentChallengeId.value || !roomContext.value.roomCode || !roomContext.value.participantId) {
+    return;
+  }
+
+  executionState.typechecking = true;
+  executionState.error = "";
+
+  try {
+    executionState.typecheckResult = await requestJson<RoomTypecheckResponse>("/api/rooms/" + roomContext.value.roomCode + "/typecheck", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        participantSessionId: roomContext.value.participantId,
+        challengeId: currentChallengeId.value,
+        source: displayedSource.value
+      })
+    });
+  } catch (error) {
+    executionState.error = getErrorMessage(error, "Nao foi possivel rodar o typecheck.");
+  } finally {
+    executionState.typechecking = false;
+  }
+}
+
+async function runRuntimeRequest(): Promise<void> {
+  if (!currentChallengeId.value || !roomContext.value.roomCode || !roomContext.value.participantId) {
+    return;
+  }
+
+  executionState.running = true;
+  executionState.error = "";
+
+  try {
+    executionState.runResult = await requestJson<RoomRunResponse>("/api/rooms/" + roomContext.value.roomCode + "/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        participantSessionId: roomContext.value.participantId,
+        challengeId: currentChallengeId.value,
+        source: displayedSource.value
+      })
+    });
+  } catch (error) {
+    executionState.error = getErrorMessage(error, "Nao foi possivel executar o codigo.");
+  } finally {
+    executionState.running = false;
   }
 }
 
@@ -1004,6 +1105,11 @@ function resetChallengeUiState(): void {
   hintState.requesting = false;
   hintState.error = "";
   hintState.currentHint = null;
+  executionState.typechecking = false;
+  executionState.running = false;
+  executionState.error = "";
+  executionState.typecheckResult = null;
+  executionState.runResult = null;
   clearCelebrationTimers();
   activeBalloons.value = [];
 }
@@ -1168,9 +1274,16 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
               <strong>{{ room.name }}</strong>
               <p class="muted-text">Codigo: {{ room.roomCode }} | Status: {{ room.status }}</p>
               <p class="muted-text">Template: {{ getChallengeLabel(room.challengeId) }}</p>
+              <p class="muted-text">tsc: {{ normalizeExecutionSettings(room.executionSettings).allowTypecheck ? "liberado" : "bloqueado" }} | execucao: {{ normalizeExecutionSettings(room.executionSettings).allowRuntimeExecution ? "liberada" : "bloqueada" }}</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-button" type="button" @click="navigate(`/room/${room.roomCode}`)">Ver sala</button>
+              <button class="secondary-button" type="button" @click="updateRoomExecutionSettings(room.roomCode, { allowTypecheck: !normalizeExecutionSettings(room.executionSettings).allowTypecheck })">
+                {{ normalizeExecutionSettings(room.executionSettings).allowTypecheck ? "Bloquear tsc" : "Liberar tsc" }}
+              </button>
+              <button class="secondary-button" type="button" @click="updateRoomExecutionSettings(room.roomCode, { allowRuntimeExecution: !normalizeExecutionSettings(room.executionSettings).allowRuntimeExecution })">
+                {{ normalizeExecutionSettings(room.executionSettings).allowRuntimeExecution ? "Bloquear execucao" : "Liberar execucao" }}
+              </button>
               <button type="button" @click="deleteRoom(room.roomCode)">Deletar</button>
             </div>
           </li>
@@ -1389,6 +1502,44 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
                 <p role="status">{{ hintState.currentHint.message }}</p>
               </template>
               <p v-else class="muted-text">Nenhuma dica solicitada ainda.</p>
+            </section>
+
+            <section class="panel panel-stack">
+              <div class="history-header">
+                <h2>Execucao</h2>
+                <div class="toolbar-actions">
+                  <button
+                    :disabled="executionState.typechecking || !roomExecutionSettings.allowTypecheck"
+                    class="secondary-button"
+                    type="button"
+                    @click="runTypecheckRequest"
+                  >
+                    {{ executionState.typechecking ? 'Rodando tsc...' : 'Rodar tsc' }}
+                  </button>
+                  <button
+                    :disabled="executionState.running || !roomExecutionSettings.allowRuntimeExecution"
+                    class="secondary-button"
+                    type="button"
+                    @click="runRuntimeRequest"
+                  >
+                    {{ executionState.running ? 'Executando...' : 'Executar codigo' }}
+                  </button>
+                </div>
+              </div>
+              <p class="muted-text">Use os controles liberados pelo admin para validar o codigo exibido no desafio.</p>
+              <p class="muted-text">tsc: {{ roomExecutionSettings.allowTypecheck ? 'liberado' : 'bloqueado' }} | runtime: {{ roomExecutionSettings.allowRuntimeExecution ? 'liberado' : 'bloqueado' }}</p>
+              <p v-if="executionState.error" class="error-text">{{ executionState.error }}</p>
+              <template v-if="executionState.typecheckResult">
+                <p><strong>Typecheck:</strong> {{ executionState.typecheckResult.ok ? 'sem erros' : 'com diagnosticos' }}</p>
+                <pre class="diff-preview"><code>{{ executionState.typecheckResult.rawOutput }}</code></pre>
+              </template>
+              <template v-if="executionState.runResult">
+                <p><strong>Runtime:</strong> {{ executionState.runResult.ok ? 'ok' : executionState.runResult.terminationReason || 'falhou' }}</p>
+                <p><strong>Saida padrao</strong></p>
+                <pre class="diff-preview"><code>{{ executionState.runResult.stdout || 'Sem stdout.' }}</code></pre>
+                <p><strong>Saida de erro</strong></p>
+                <pre class="diff-preview"><code>{{ executionState.runResult.stderr || 'Sem stderr.' }}</code></pre>
+              </template>
             </section>
 
             <section v-if="resolvedBugHistory.length > 0" class="panel panel-stack latest-resolved-panel">

@@ -104,6 +104,7 @@ function initializeEditor(): void {
     hideCursorInOverviewRuler: true,
     renderLineHighlight: "none",
     scrollBeyondLastLine: false,
+    trimAutoWhitespace: false,
     wordWrap: "on",
     wrappingIndent: "indent",
     folding: false,

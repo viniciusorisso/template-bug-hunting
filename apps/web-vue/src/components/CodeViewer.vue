@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type * as Monaco from "monaco-editor";
-import type { CodeRange, ResolvedBugDiff } from "@ts-bug-hunt/core";
+import { normalizeRange, type CodeRange, type ResolvedBugDiff } from "@ts-bug-hunt/core";
 import { ensureMonacoSetup, resolveMonacoTheme } from "@/lib/monaco";
 
 type SelectionPayload = {
@@ -292,9 +292,20 @@ function syncSelection(range: CodeRange | null): void {
     return;
   }
 
-  const selection = new monaco.Selection(range.startLine, range.startColumn, range.endLine, range.endColumn);
+  const normalizedRange = normalizeRange(range);
+  const selection = new monaco.Selection(
+    normalizedRange.startLine,
+    normalizedRange.startColumn,
+    normalizedRange.endLine,
+    normalizedRange.endColumn
+  );
 
-  if (editor.getSelection()?.equalsSelection(selection)) {
+  const currentSelection = editor.getSelection();
+
+  if (
+    currentSelection &&
+    rangesEqual(normalizeRange(selectionToRange(currentSelection)), normalizedRange)
+  ) {
     return;
   }
 
@@ -319,15 +330,38 @@ function emitSelection(selection: Monaco.Selection): void {
     return;
   }
 
-  emit("range-selected", {
-    range: {
-      startLine: selection.startLineNumber,
-      startColumn: selection.startColumn,
-      endLine: selection.endLineNumber,
-      endColumn: selection.endColumn
-    },
-    text: model.getValueInRange(selection)
+  const range = normalizeRange({
+    startLine: selection.startLineNumber,
+    startColumn: selection.startColumn,
+    endLine: selection.endLineNumber,
+    endColumn: selection.endColumn
   });
+
+  emit("range-selected", {
+    range,
+    text: model.getValueInRange({
+      startLineNumber: range.startLine,
+      startColumn: range.startColumn,
+      endLineNumber: range.endLine,
+      endColumn: range.endColumn
+    })
+  });
+}
+
+function selectionToRange(selection: Monaco.Selection): CodeRange {
+  return {
+    startLine: selection.startLineNumber,
+    startColumn: selection.startColumn,
+    endLine: selection.endLineNumber,
+    endColumn: selection.endColumn
+  };
+}
+
+function rangesEqual(left: CodeRange, right: CodeRange): boolean {
+  return left.startLine === right.startLine
+    && left.startColumn === right.startColumn
+    && left.endLine === right.endLine
+    && left.endColumn === right.endColumn;
 }
 
 function selectFocusedLine(): void {

@@ -2,6 +2,7 @@ import type {
   ParticipantSession,
   Room,
   RoomActivityItem,
+  RoomExecutionSettings,
   RoomSummary,
   SubmissionStatus
 } from "../types.js";
@@ -29,6 +30,7 @@ type CreateRoomInput = {
   roomCode: string;
   challengeId: string;
   createdAt: string;
+  executionSettings?: RoomExecutionSettings;
 };
 
 type RecordActivityInput = {
@@ -94,7 +96,8 @@ export class InMemoryRoomStore {
       roomCode: input.roomCode,
       challengeId: input.challengeId,
       status: "active",
-      createdAt: input.createdAt
+      createdAt: input.createdAt,
+      executionSettings: normalizeExecutionSettings(input.executionSettings)
     };
 
     this.rooms.set(room.roomCode, room);
@@ -130,6 +133,24 @@ export class InMemoryRoomStore {
     });
 
     return true;
+  }
+
+  updateExecutionSettings(roomCode: string, settings: RoomExecutionSettings): RoomSummary | undefined {
+    const room = this.rooms.get(roomCode);
+
+    if (!room) {
+      return undefined;
+    }
+
+    this.rooms.set(roomCode, {
+      ...room,
+      executionSettings: normalizeExecutionSettings({
+        ...room.executionSettings,
+        ...settings
+      })
+    });
+
+    return this.getRoomSummary(roomCode);
   }
 
   joinRoom(roomCode: string, participant: ParticipantSession): ParticipantSession | null {
@@ -174,4 +195,11 @@ export class InMemoryRoomStore {
       activity: Object.fromEntries(this.activity.entries())
     };
   }
+}
+
+function normalizeExecutionSettings(settings: RoomExecutionSettings | undefined): Required<RoomExecutionSettings> {
+  return {
+    allowTypecheck: settings?.allowTypecheck ?? false,
+    allowRuntimeExecution: settings?.allowRuntimeExecution ?? false
+  };
 }

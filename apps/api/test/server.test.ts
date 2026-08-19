@@ -212,6 +212,160 @@ test("POST /api/rooms/join permite entrada em sala ativa", async () => {
   assert.ok(typeof payload.participantSessionId === "string");
 });
 
+test("POST /api/admin/rooms cria sala com execucao desabilitada por default e PATCH atualiza as flags", async () => {
+  const createResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma Exec", password: "room-secret", challengeId: "ts-type-system-bug-hunt" })
+  });
+  const createdRoom = await createResponse.json();
+
+  assert.equal(createResponse.status, 201);
+  assert.deepEqual(createdRoom.executionSettings, { allowTypecheck: false, allowRuntimeExecution: false });
+
+  const patchResponse = await fetch(`${baseUrl}/api/admin/rooms/${createdRoom.roomCode}/execution-settings`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ allowTypecheck: true, allowRuntimeExecution: true })
+  });
+  const patchPayload = await patchResponse.json();
+
+  assert.equal(patchResponse.status, 200);
+  assert.deepEqual(patchPayload.executionSettings, { allowTypecheck: true, allowRuntimeExecution: true });
+
+  const listResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    headers: {
+      Authorization: `Bearer ${adminToken}`
+    }
+  });
+  const rooms = await listResponse.json();
+  const updatedRoom = rooms.find((room) => room.roomCode === createdRoom.roomCode);
+
+  assert.deepEqual(updatedRoom.executionSettings, { allowTypecheck: true, allowRuntimeExecution: true });
+});
+
+test("POST /api/rooms/:roomCode/typecheck bloqueia salas sem permissao", async () => {
+  const joinResponse = await fetch(`${baseUrl}/api/rooms/join`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ roomCode, displayName: "Exec Block" })
+  });
+  const joinPayload = await joinResponse.json();
+
+  const response = await fetch(`${baseUrl}/api/rooms/${roomCode}/typecheck`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      participantSessionId: joinPayload.participantSessionId,
+      challengeId: "checkout-ts-bug-hunt",
+      source: "export const value = 1;"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.match(String(payload.message), /Typecheck nao habilitado/);
+});
+
+test("POST /api/rooms/:roomCode/typecheck e /run funcionam quando a sala libera execucao", async () => {
+  const createResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma Runtime", password: "room-secret", challengeId: "ts-type-system-bug-hunt" })
+  });
+  const createdRoom = await createResponse.json();
+
+  await fetch(`${baseUrl}/api/admin/rooms/${createdRoom.roomCode}/execution-settings`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ allowTypecheck: true, allowRuntimeExecution: true })
+  });
+
+  const joinResponse = await fetch(`${baseUrl}/api/rooms/join`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ roomCode: createdRoom.roomCode, displayName: "Exec User" })
+  });
+  const joinPayload = await joinResponse.json();
+
+  assert.deepEqual(joinPayload.executionSettings, { allowTypecheck: true, allowRuntimeExecution: true });
+
+  const typecheckResponse = await fetch(`${baseUrl}/api/rooms/${createdRoom.roomCode}/typecheck`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      participantSessionId: joinPayload.participantSessionId,
+      challengeId: "ts-type-system-bug-hunt",
+      source: "const value: string = 123; export {};"
+    })
+  });
+  const typecheckPayload = await typecheckResponse.json();
+
+  assert.equal(typecheckResponse.status, 200);
+  assert.equal(typecheckPayload.ok, false);
+  assert.match(String(typecheckPayload.rawOutput), /TS2322/);
+
+  const runtimeSource = [
+    'type Role = "viewer";',
+    'type Theme = "light" | "dark";',
+    'type Notification = { type: "email"; address: string };',
+    'type UserPatch = { id?: string | null; email?: string | null; roles?: readonly Role[]; preferences?: { theme: Theme; shortcuts?: readonly string[] }; metadata?: Record<string, string> };',
+    'type UserSummary = { id: string; email: string; primaryRole: Role; shortcuts: string[]; theme: Theme; analyticsId: string };',
+    'export function buildUserSummary(patch: UserPatch, fallbackRole: Role = "viewer"): UserSummary {',
+    '  return {',
+    '    id: patch.id?.trim() ?? "",',
+    '    email: patch.email?.toLowerCase() ?? "",',
+    '    primaryRole: patch.roles?.[0] ?? fallbackRole,',
+    '    shortcuts: [...(patch.preferences?.shortcuts ?? ["cmd+k"]), "cmd+/"],',
+    '    theme: patch.preferences?.theme ?? "light",',
+    '    analyticsId: patch.metadata?.analyticsId ?? ""',
+    '  };',
+    '}',
+    'export function getNotificationTarget(notification: Notification) {',
+    '  return notification.address.trim().toLowerCase();',
+    '}'
+  ].join("\n");
+
+  const runResponse = await fetch(`${baseUrl}/api/rooms/${createdRoom.roomCode}/run`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      participantSessionId: joinPayload.participantSessionId,
+      challengeId: "ts-type-system-bug-hunt",
+      source: runtimeSource
+    })
+  });
+  const runPayload = await runResponse.json();
+
+  assert.equal(runResponse.status, 200);
+  assert.equal(runPayload.ok, true);
+  assert.equal(runPayload.exitCode, 0);
+  assert.match(String(runPayload.stdout), /primaryRole/);
+  assert.match(String(runPayload.stdout), /user@example.com/);
+});
+
 test("GET /api/session-progress retorna estado inicial da sessao", async () => {
   const response = await fetch(`${baseUrl}/api/session-progress/session-a/checkout-ts-bug-hunt`);
   const payload = await response.json();
