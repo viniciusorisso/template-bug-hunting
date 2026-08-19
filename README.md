@@ -11,6 +11,7 @@ A camada de UI inicial sera Vue, mas o dominio do desafio, validadores, contrato
 - [PRD](docs/prd.md): objetivos, escopo, requisitos e metricas do produto.
 - [Technical Specification](docs/spec.md): arquitetura, contratos, validacao, entregaveis e estrategia de testes.
 - [Bug Catalog](docs/bug-catalog.md): desafio inicial com 10 bugs, categorias, dificuldade, embasamento tecnico e validadores esperados.
+- [Bug Fixes](docs/bug-fixes.md): bugs conhecidos do produto que precisam de ajuste, com impacto, evidencias e criterios de aceite.
 
 ## Rodando localmente
 

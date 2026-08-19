@@ -14,6 +14,13 @@ export type BugPatch = {
   replacement: string;
 };
 
+export type HintLevel = 1 | 2;
+
+export type BugHint = {
+  level: HintLevel;
+  message: string;
+};
+
 export type ResolvedBugDiff = {
   bugId: string;
   originalRange: CodeRange;
@@ -37,6 +44,13 @@ export type SessionProgress = {
   challengeId: string;
   solvedBugIds: string[];
   attempts: SubmissionAttempt[];
+};
+
+export type HintState = {
+  sessionId: string;
+  challengeId: string;
+  roomCode?: string;
+  consumedHintsByBug: Record<string, HintLevel[]>;
 };
 
 export type BugValidationTestId =
@@ -69,6 +83,7 @@ export type BugDefinition = {
   expectedFix: string;
   technicalBasis: string;
   patch: BugPatch;
+  hints: BugHint[];
 };
 
 export type ChallengeDefinition = {
@@ -120,6 +135,22 @@ export type SubmitBugResponse = {
   resolvedBugDiff?: ResolvedBugDiff;
 };
 
+export type RequestHintPayload = {
+  challengeId: string;
+  sessionId: string;
+  roomCode?: string;
+};
+
+export type RequestHintResponse = {
+  challengeId: string;
+  roomCode?: string;
+  bugId: string;
+  difficulty: Difficulty;
+  hintLevel: HintLevel;
+  message: string;
+  category: string;
+};
+
 export type ResolvedBugEvent = {
   type: "bug.resolved";
   challengeId: string;
@@ -161,7 +192,6 @@ export type RoomActivityItem = {
   status: SubmissionStatus;
   submittedBy: string;
   submittedAt: string;
-  proposedFix: string;
 };
 
 export type RoomActivityResponse = {

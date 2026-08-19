@@ -94,7 +94,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 32, startColumn: 18, endLine: 32, endColumn: 39 },
         replacement: 'input.userId?.trim() ?? ""'
-      }
+      },
+      hints: [
+        { level: 1, message: "Ha uma suposicao otimista demais sobre um campo do usuario logo no inicio da funcao." },
+        { level: 2, message: "Revise o primeiro acesso a dados do usuario e pense no que acontece quando esse valor nao chega preenchido em runtime." }
+      ]
     },
     {
       id: "B002",
@@ -108,7 +112,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 35, startColumn: 19, endLine: 35, endColumn: 42 },
         replacement: "i < input.items.length"
-      }
+      },
+      hints: [
+        { level: 1, message: "Existe um problema de limite na iteracao que monta o subtotal do carrinho." },
+        { level: 2, message: "Compare a condicao de parada do loop com o intervalo valido de indices de um array em JavaScript." }
+      ]
     },
     {
       id: "B003",
@@ -122,7 +130,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 41, startColumn: 20, endLine: 41, endColumn: 61 },
         replacement: "candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()"
-      }
+      },
+      hints: [
+        { level: 1, message: "A busca do cupom mistura um valor opcional com comparacao textual sensivel ao formato dos dados." },
+        { level: 2, message: "Olhe para a expressao que localiza o cupom e revise tanto a ausencia do valor informado quanto a consistencia do formato comparado." }
+      ]
     },
     {
       id: "B004",
@@ -136,7 +148,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 45, startColumn: 17, endLine: 45, endColumn: 78 },
         replacement: "!coupon.expiresAt || new Date(coupon.expiresAt) >= input.now"
-      }
+      },
+      hints: [
+        { level: 1, message: "A regra temporal do cupom esta invertendo o sentido do que significa estar valido agora." },
+        { level: 2, message: "Revise a comparacao entre a data de expiracao e o instante atual: o ramo verdadeiro hoje aceita um estado que deveria bloquear o desconto." }
+      ]
     },
     {
       id: "B005",
@@ -150,7 +166,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 46, startColumn: 9, endLine: 46, endColumn: 46 },
         replacement: "coupon.plans && !coupon.plans.includes(input.plan)"
-      }
+      },
+      hints: [
+        { level: 1, message: "Uma regra opcional do cupom esta sendo tratada como se sempre existisse antes da validacao do plano." },
+        { level: 2, message: "Observe a condicao que rejeita o plano: quando a lista de planos nao vem informada, o comportamento atual nao representa uma regra global." }
+      ]
     },
     {
       id: "B006",
@@ -164,7 +184,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 50, startColumn: 9, endLine: 50, endColumn: 57 },
         replacement: "coupon.maxUses !== undefined && coupon.used >= coupon.maxUses"
-      }
+      },
+      hints: [
+        { level: 1, message: "A protecao contra excesso de uso falha em um caso de fronteira e tambem depende demais de truthiness." },
+        { level: 2, message: "Reveja a validacao do limite maximo pensando em dois cenarios: quando o total permitido ja foi atingido e quando o limite configurado pode ser zero." }
+      ]
     },
     {
       id: "B007",
@@ -178,7 +202,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 54, startColumn: 9, endLine: 54, endColumn: 35 },
         replacement: 'coupon.type === "percent"'
-      }
+      },
+      hints: [
+        { level: 1, message: "A decisao entre desconto percentual e fixo esta alterando estado quando deveria apenas verificar uma condicao." },
+        { level: 2, message: "Inspecione o operador usado no if que escolhe o tipo de desconto: hoje ele faz mais do que comparar." }
+      ]
     },
     {
       id: "B008",
@@ -192,7 +220,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 55, startColumn: 18, endLine: 55, endColumn: 53 },
         replacement: "Math.round(subtotal * (coupon.amount / 100))"
-      }
+      },
+      hints: [
+        { level: 1, message: "O calculo percentual do desconto ignora que o dominio usa centavos inteiros, nao valores fracionarios." },
+        { level: 2, message: "Revise a operacao que converte porcentagem em desconto monetario e defina uma politica numerica explicita para o resultado." }
+      ]
     },
     {
       id: "B009",
@@ -206,7 +238,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 60, startColumn: 5, endLine: 60, endColumn: 18 },
         replacement: "// coupon usage should be persisted outside this calculation"
-      }
+      },
+      hints: [
+        { level: 1, message: "A rotina de calculo esta assumindo uma responsabilidade de persistencia que cria efeito colateral sobre a entrada." },
+        { level: 2, message: "Procure a linha que altera o proprio cupom durante o calculo: esse passo deveria ser tratado fora da funcao pura de checkout." }
+      ]
     },
     {
       id: "B010",
@@ -220,7 +256,11 @@ export const checkoutChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 64, startColumn: 15, endLine: 64, endColumn: 62 },
         replacement: "Math.round(totalBeforeTax * 0.08875)"
-      }
+      },
+      hints: [
+        { level: 1, message: "A conversao final do imposto esta descartando informacao numerica de um jeito mais textual do que financeiro." },
+        { level: 2, message: "Reveja a etapa que transforma o imposto em inteiro: a operacao atual corta casas decimais sem declarar a politica monetaria desejada." }
+      ]
     }
   ]
 };

@@ -4,6 +4,7 @@ import App from "./App.vue";
 import { getChallengeById } from "@ts-bug-hunt/core";
 import type {
   ChallengeStateResponse,
+  RequestHintResponse,
   ResolvedBugDiff,
   ResolvedBugEvent,
   RoomActivityItem,
@@ -90,6 +91,16 @@ const resolvedCombinedState: ChallengeStateResponse = {
 };
 
 const challengeRoute = `/?roomCode=ROOM01&roomName=Turma%201&participantSessionId=session-1&participantName=Risso&challengeId=${challenge.id}`;
+const challengeStatePath = `/api/challenge-state/${challenge.id}?roomCode=ROOM01`;
+const firstHint: RequestHintResponse = {
+  challengeId: challenge.id,
+  roomCode: "ROOM01",
+  bugId: "B001",
+  difficulty: "easy",
+  hintLevel: 1,
+  category: "Nullability / runtime safety",
+  message: "Ha uma suposicao otimista demais sobre um campo do usuario logo no inicio da funcao."
+};
 
 describe("App", () => {
   beforeEach(() => {
@@ -117,7 +128,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           return createJsonResponse(emptyChallengeState);
         }
 
@@ -180,7 +191,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           challengeStateRequestCount += 1;
           return createJsonResponse(challengeStateRequestCount > 1 ? resolvedLoopState : emptyChallengeState);
         }
@@ -239,6 +250,49 @@ describe("App", () => {
     expect(wrapper.find('[data-resolved-bugs="B002"]').classes()).toContain("code-line-highlighted");
   });
 
+  it("requests a hint and shows the current guidance", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.includes(challengeStatePath)) {
+          return createJsonResponse(emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        if (input.endsWith("/api/hints/request") && init?.method === "POST") {
+          return createJsonResponse(firstHint);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+    const hintButton = wrapper.findAll(".secondary-button").find((candidate) => candidate.text() === "Pedir dica");
+    await hintButton?.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Dificuldade: facil");
+    expect(wrapper.text()).toContain(firstHint.category);
+    expect(wrapper.text()).toContain(firstHint.message);
+  });
+
   it("refreshes challenge-state and shows a realtime notification from another session", async () => {
     const EventSourceStub = createEventSourceStub();
     vi.stubGlobal("EventSource", EventSourceStub);
@@ -254,7 +308,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           challengeStateRequestCount += 1;
           return createJsonResponse(challengeStateRequestCount > 1 ? resolvedCouponState : emptyChallengeState);
         }
@@ -309,7 +363,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           challengeStateRequestCount += 1;
           return createJsonResponse(challengeStateRequestCount > 1 ? resolvedCouponState : emptyChallengeState);
         }
@@ -372,7 +426,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           return createJsonResponse(resolvedCouponState);
         }
 
@@ -429,7 +483,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           challengeStateRequestCount += 1;
 
           if (challengeStateRequestCount === 1) {
@@ -510,7 +564,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           return createJsonResponse(resolvedCouponState);
         }
 
@@ -562,7 +616,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           return createJsonResponse(emptyChallengeState);
         }
 
@@ -635,7 +689,7 @@ describe("App", () => {
           return createJsonResponse(challenge);
         }
 
-        if (input.endsWith(`/api/challenge-state/${challenge.id}`)) {
+        if (input.includes(challengeStatePath)) {
           return createJsonResponse(emptyChallengeState);
         }
 
@@ -661,6 +715,139 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Sala Turma 1 | Participante Risso");
   });
 
+  it("resets resolved history when the user switches rooms", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.includes(`/api/challenge-state/${challenge.id}?roomCode=ROOM01`)) {
+          return createJsonResponse(resolvedLoopState);
+        }
+
+        if (input.includes(`/api/challenge-state/${challenge.id}?roomCode=ROOM02`)) {
+          return createJsonResponse(emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-2/${challenge.id}`)) {
+          return createJsonResponse({ ...initialProgress, sessionId: "session-2" });
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+    expect(wrapper.text()).toContain("Historico de resolucoes");
+    expect(wrapper.text()).toContain("Loop acessa indice fora do array");
+
+    window.history.pushState(
+      {},
+      "",
+      `/?roomCode=ROOM02&roomName=Turma%202&participantSessionId=session-2&participantName=Ana&challengeId=${challenge.id}`
+    );
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Loop acessa indice fora do array");
+    expect(wrapper.text()).toContain("Nenhum bug resolvido ainda.");
+  });
+
+  it("allows the admin to logout and authenticate again", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith("/api/admin/status")) {
+          return createJsonResponse({ configured: true, username: "admin" });
+        }
+
+        if (input.endsWith("/api/admin/rooms") && init?.method === undefined) {
+          return createJsonResponse([
+            { id: "room-1", name: "Turma 1", roomCode: "ROOM01", challengeId: challenge.id, status: "active", createdAt: "2026-08-18" }
+          ]);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.admin-token", "admin-token");
+    window.history.pushState({}, "", "/admin");
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Sessao admin ativa");
+    expect(wrapper.text()).toContain("Criar sala");
+
+    const logoutButton = wrapper.findAll("button").find((candidate) => candidate.text() === "Sair");
+    await logoutButton?.trigger("click");
+    await flushPromises();
+
+    expect(window.localStorage.getItem("ts-bug-hunt.admin-token")).toBeNull();
+    expect(wrapper.text()).not.toContain("Criar sala");
+    expect(wrapper.text()).toContain("Entrar");
+  });
+
+  it("clears an invalid admin session after unauthorized requests", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith("/api/admin/status")) {
+          return createJsonResponse({ configured: true, username: "admin" });
+        }
+
+        if (input.endsWith("/api/admin/rooms") && init?.method === undefined) {
+          return createJsonResponse({ message: "Nao autorizado." }, { status: 401 });
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.admin-token", "admin-token");
+    window.history.pushState({}, "", "/admin");
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(window.localStorage.getItem("ts-bug-hunt.admin-token")).toBeNull();
+    expect(wrapper.text()).toContain("Sessao admin invalida ou expirada. Entre novamente.");
+    expect(wrapper.text()).not.toContain("Criar sala");
+  });
+
   it("renders room observer activity and reacts to SSE updates", async () => {
     window.history.pushState({}, "", "/room/ROOM01");
     window.localStorage.setItem("ts-bug-hunt.admin-token", "admin-token");
@@ -675,8 +862,7 @@ describe("App", () => {
         bugId: "B002",
         status: "solved",
         submittedBy: "Risso",
-        submittedAt: "2026-08-18T00:00:00.000Z",
-        proposedFix: "Trocar <= por <."
+        submittedAt: "2026-08-18T00:00:00.000Z"
       }
     ];
 
@@ -710,8 +896,7 @@ describe("App", () => {
         bugId: "B003",
         status: "partial",
         submittedBy: "Ana",
-        submittedAt: "2026-08-18T00:01:00.000Z",
-        proposedFix: "Normalizar os dois lados."
+        submittedAt: "2026-08-18T00:01:00.000Z"
       }
     });
     await flushPromises();
@@ -719,15 +904,22 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Sala ROOM01");
     expect(wrapper.text()).toContain("Risso");
     expect(wrapper.text()).toContain("Ana");
+    expect(wrapper.text()).toContain("Resposta protegida para evitar vazamento.");
+    expect(wrapper.text()).not.toContain("Trocar <= por <.");
   });
 });
 
-function createJsonResponse(payload: unknown): Response {
+function createJsonResponse(payload: unknown, init?: { status?: number }): Response {
+  const status = init?.status ?? 200;
+
   return {
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: () => null
+    },
     json: async () => payload
-  } as Response;
+  } as unknown as Response;
 }
 
 function createEventSourceStub() {

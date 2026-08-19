@@ -11,6 +11,7 @@ import {
   InMemorySessionStore,
   listChallenges,
   projectResolvedSource,
+  selectNextHint,
   validateSubmission,
   type AdminAuthRequest,
   type AdminCredentials,
@@ -20,7 +21,10 @@ import {
   type CodeRange,
   type CreateRoomRequest,
   type JoinRoomRequest,
+  type HintLevel,
+  type HintState,
   type JoinRoomResponse,
+  type RequestHintPayload,
   type ResolvedBugEvent,
   type RoomActivityEvent,
   type RoomActivityResponse,
@@ -35,12 +39,18 @@ type StreamClient = {
   response: http.ServerResponse;
 };
 
+type ChallengeStateScope = {
+  challengeId: string;
+  roomCode?: string;
+};
+
 type PersistedApiState = {
-  version: 1;
+  version: 2;
   admin?: AdminStoreSnapshot;
   rooms: RoomStoreSnapshot;
   sessions: SessionProgress[];
   challengeResolvedBugOrder: Record<string, string[]>;
+  hintStates: HintState[];
 };
 
 type CreateServerOptions = {
@@ -48,23 +58,44 @@ type CreateServerOptions = {
   adminStore?: InMemoryAdminStore;
   roomStore?: InMemoryRoomStore;
   stateFilePath?: string;
+  now?: () => number;
 };
 
 const ADMIN_TOKEN = "admin-session-token";
 const ADMIN_USERNAME_ENV = "TS_BUG_HUNT_ADMIN_USERNAME";
 const ADMIN_PASSWORD_ENV = "TS_BUG_HUNT_ADMIN_PASSWORD";
 const ADMIN_PASSWORD_HASH_ENV = "TS_BUG_HUNT_ADMIN_PASSWORD_HASH";
+const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const ADMIN_LOGIN_BLOCK_MS = 5 * 60 * 1000;
+
+type AdminLoginAttemptState = {
+  attempts: number[];
+  blockedUntil?: number;
+};
 
 export function createServer(options: CreateServerOptions = {}): http.Server {
   const persistedState = options.stateFilePath ? loadPersistedState(options.stateFilePath) : null;
   const store = options.store ?? new InMemorySessionStore(persistedState?.sessions ?? []);
   const adminStore = options.adminStore ?? new InMemoryAdminStore(resolveAdminCredentials());
   const roomStore = options.roomStore ?? new InMemoryRoomStore(persistedState?.rooms ?? {});
+  const now = options.now ?? Date.now;
   const streamClients = new Set<StreamClient>();
+  const adminLoginAttempts = new Map<string, AdminLoginAttemptState>();
   const challengeResolvedBugOrder = new Map<string, string[]>(
     Object.entries(persistedState?.challengeResolvedBugOrder ?? {})
   );
-  const persistState = createStatePersister(options.stateFilePath, store, adminStore, roomStore, challengeResolvedBugOrder);
+  const hintStates = new Map<string, HintState>(
+    (persistedState?.hintStates ?? []).map((state) => [getHintStateKey(state.sessionId, state.challengeId, state.roomCode), state])
+  );
+  const persistState = createStatePersister(
+    options.stateFilePath,
+    store,
+    adminStore,
+    roomStore,
+    challengeResolvedBugOrder,
+    hintStates
+  );
 
   return http.createServer(async (request, response) => {
     setCorsHeaders(response);
@@ -127,6 +158,13 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         return sendJson(response, 503, { message: "Credenciais admin nao configuradas no servidor." });
       }
 
+      const clientKey = getClientAddress(request);
+      const retryAfterSeconds = getRemainingAdminLoginBlockSeconds(adminLoginAttempts, clientKey, now());
+
+      if (retryAfterSeconds > 0) {
+        return sendRateLimitedAuthResponse(response, retryAfterSeconds);
+      }
+
       const payload = await readJson<AdminAuthRequest>(request);
 
       if (!payload?.username?.trim() || !payload.password?.trim()) {
@@ -134,9 +172,16 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
       }
 
       if (!adminStore.authenticate(payload.username.trim(), hashSecret(payload.password.trim()))) {
+        const nextRetryAfterSeconds = registerFailedAdminLoginAttempt(adminLoginAttempts, clientKey, now());
+
+        if (nextRetryAfterSeconds > 0) {
+          return sendRateLimitedAuthResponse(response, nextRetryAfterSeconds);
+        }
+
         return sendJson(response, 401, { message: "Credenciais invalidas." });
       }
 
+      adminLoginAttempts.delete(clientKey);
       return sendJson(response, 200, { token: ADMIN_TOKEN, username: payload.username.trim() });
     }
 
@@ -277,14 +322,28 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
     }
 
     if (request.method === "GET" && request.url?.startsWith("/api/challenge-state/")) {
-      const challengeId = decodeURIComponent(request.url.replace("/api/challenge-state/", ""));
+      const url = new URL(request.url, "http://localhost");
+      const challengeId = decodeURIComponent(url.pathname.replace("/api/challenge-state/", "")).trim();
+      const roomCode = normalizeRoomCode(url.searchParams.get("roomCode") ?? undefined);
       const challenge = getChallengeById(challengeId);
 
       if (!challenge) {
         return sendJson(response, 404, { message: "Challenge nao encontrado." });
       }
 
-      return sendJson(response, 200, buildChallengeStateResponse(challenge.id, challengeResolvedBugOrder));
+      if (roomCode) {
+        const room = roomStore.getRoom(roomCode);
+
+        if (!room || room.status !== "active") {
+          return sendJson(response, 404, { message: "Sala nao encontrada ou inativa." });
+        }
+
+        if (room.challengeId !== challengeId) {
+          return sendJson(response, 400, { message: "challengeId nao corresponde a sala informada." });
+        }
+      }
+
+      return sendJson(response, 200, buildChallengeStateResponse({ challengeId: challenge.id, roomCode }, challengeResolvedBugOrder));
     }
 
     if (request.method === "GET" && request.url === "/api/challenges") {
@@ -341,6 +400,37 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
       return;
     }
 
+    if (request.method === "POST" && request.url === "/api/hints/request") {
+      const payload = await readJson<RequestHintPayload>(request);
+      const error = validateHintRequest(payload, roomStore);
+
+      if (error) {
+        return sendJson(response, 400, { message: error });
+      }
+
+      const normalizedRoomCode = normalizeRoomCode(payload.roomCode);
+      const challenge = getChallengeById(payload.challengeId.trim());
+
+      if (!challenge) {
+        return sendJson(response, 404, { message: "Challenge nao encontrado." });
+      }
+
+      const hintState = getOrCreateHintState(hintStates, payload.sessionId.trim(), challenge.id, normalizedRoomCode);
+      const resolvedBugIds = getResolvedBugOrder(challengeResolvedBugOrder, challenge.id, normalizedRoomCode);
+      const hint = selectNextHint(challenge, resolvedBugIds, hintState.consumedHintsByBug, normalizedRoomCode);
+
+      if (!hint) {
+        return sendJson(response, 409, { message: "Nenhuma dica disponivel no momento." });
+      }
+
+      hintStates.set(
+        getHintStateKey(hintState.sessionId, hintState.challengeId, hintState.roomCode),
+        appendConsumedHint(hintState, hint.bugId, hint.hintLevel)
+      );
+      persistState();
+      return sendJson(response, 200, hint);
+    }
+
     if (request.method === "POST" && request.url === "/api/submissions") {
       const payload = await readJson<SubmitBugRequest>(request);
 
@@ -354,10 +444,19 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         return sendJson(response, 400, { message: error });
       }
 
+      const normalizedRoomCode = normalizeRoomCode(payload.roomCode);
       const currentProgress = store.getOrCreate(payload.sessionId, payload.challengeId);
       const baseResult = validateSubmission(payload, currentProgress);
-      syncChallengeResolvedBugOrder(challengeResolvedBugOrder, payload.challengeId, baseResult.bugId, baseResult.status);
-      const challengeState = buildChallengeStateResponse(payload.challengeId, challengeResolvedBugOrder);
+      syncChallengeResolvedBugOrder(
+        challengeResolvedBugOrder,
+        { challengeId: payload.challengeId, roomCode: normalizedRoomCode },
+        baseResult.bugId,
+        baseResult.status
+      );
+      const challengeState = buildChallengeStateResponse(
+        { challengeId: payload.challengeId, roomCode: normalizedRoomCode },
+        challengeResolvedBugOrder
+      );
       const enrichedResult = {
         ...baseResult,
         resolvedBugDiff: baseResult.bugId ? challengeState.resolvedBugDiffs[baseResult.bugId] : undefined
@@ -365,20 +464,19 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
       const nextProgress = appendAttempt(currentProgress, payload, enrichedResult);
       store.save(nextProgress);
 
-      if (payload.roomCode && payload.participantName) {
+      if (normalizedRoomCode && payload.participantName) {
         const activity = roomStore.recordActivity({
-          roomCode: payload.roomCode,
+          roomCode: normalizedRoomCode,
           challengeId: payload.challengeId,
           bugId: enrichedResult.bugId,
           status: enrichedResult.status,
           submittedBy: payload.participantName,
-          submittedAt: new Date().toISOString(),
-          proposedFix: payload.proposedFix
+          submittedAt: new Date().toISOString()
         });
 
         broadcastRoomActivity(streamClients, {
           type: "room.activity",
-          roomCode: payload.roomCode,
+          roomCode: normalizedRoomCode,
           item: activity
         });
       }
@@ -389,7 +487,7 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         const event = buildResolvedBugEvent(payload, enrichedResult, challengeState);
 
         if (event) {
-          broadcastResolvedBug(streamClients, event, payload.roomCode);
+          broadcastResolvedBug(streamClients, event, normalizedRoomCode);
         }
       }
 
@@ -425,6 +523,34 @@ async function readJson<T>(request: http.IncomingMessage): Promise<T> {
   } catch {
     return null as T;
   }
+}
+
+function validateHintRequest(payload: RequestHintPayload | null, roomStore: InMemoryRoomStore): string | null {
+  if (!payload || typeof payload !== "object") {
+    return "Payload JSON invalido.";
+  }
+
+  if (!payload.challengeId?.trim()) {
+    return "challengeId e obrigatorio.";
+  }
+
+  if (!payload.sessionId?.trim()) {
+    return "sessionId e obrigatorio.";
+  }
+
+  if (payload.roomCode) {
+    const room = roomStore.getRoom(payload.roomCode.trim().toUpperCase());
+
+    if (!room || room.status !== "active") {
+      return "roomCode invalido.";
+    }
+
+    if (room.challengeId !== payload.challengeId.trim()) {
+      return "challengeId nao corresponde a sala informada.";
+    }
+  }
+
+  return null;
 }
 
 function validateRequest(payload: SubmitBugRequest | null, roomStore: InMemoryRoomStore): string | null {
@@ -497,7 +623,7 @@ function buildResolvedBugEvent(
     title: bug.title,
     resolvedAt: new Date().toISOString(),
     diff,
-    shortDescription: bug.expectedFix
+    shortDescription: bug.technicalBasis
   };
 }
 
@@ -546,8 +672,149 @@ function sendJson(response: http.ServerResponse, status: number, payload: unknow
   response.end(JSON.stringify(payload));
 }
 
+function sendRateLimitedAuthResponse(response: http.ServerResponse, retryAfterSeconds: number): void {
+  response.writeHead(429, {
+    "Content-Type": "application/json",
+    "Retry-After": String(retryAfterSeconds)
+  });
+  response.end(
+    JSON.stringify({
+      message: `Muitas tentativas de login. Aguarde ${retryAfterSeconds}s antes de tentar novamente.`
+    })
+  );
+}
+
+function normalizeRoomCode(roomCode: string | null | undefined): string | undefined {
+  const normalized = roomCode?.trim().toUpperCase();
+  return normalized ? normalized : undefined;
+}
+
+function getChallengeStateKey(challengeId: string, roomCode?: string): string {
+  return roomCode ? `room:${roomCode}:${challengeId}` : `global:${challengeId}`;
+}
+
+function getResolvedBugOrder(
+  state: Map<string, string[]>,
+  challengeId: string,
+  roomCode?: string
+): string[] {
+  const scopedKey = getChallengeStateKey(challengeId, roomCode);
+  const scoped = state.get(scopedKey);
+
+  if (scoped) {
+    return scoped;
+  }
+
+  if (roomCode) {
+    return [];
+  }
+
+  return state.get(`global:${challengeId}`) ?? state.get(challengeId) ?? [];
+}
+
 function isAuthorized(request: http.IncomingMessage): boolean {
   return request.headers.authorization === `Bearer ${ADMIN_TOKEN}`;
+}
+
+function getClientAddress(request: http.IncomingMessage): string {
+  const forwardedFor = request.headers["x-forwarded-for"];
+
+  if (typeof forwardedFor === "string") {
+    return forwardedFor.split(",")[0]?.trim() || "unknown";
+  }
+
+  if (Array.isArray(forwardedFor) && forwardedFor[0]) {
+    return forwardedFor[0].split(",")[0]?.trim() || "unknown";
+  }
+
+  return request.socket.remoteAddress?.trim() || "unknown";
+}
+
+function getRemainingAdminLoginBlockSeconds(
+  attemptsByClient: Map<string, AdminLoginAttemptState>,
+  clientKey: string,
+  currentTime: number
+): number {
+  const state = attemptsByClient.get(clientKey);
+
+  if (!state) {
+    return 0;
+  }
+
+  state.attempts = state.attempts.filter((attemptTime) => currentTime - attemptTime <= ADMIN_LOGIN_WINDOW_MS);
+
+  if (!state.blockedUntil || state.blockedUntil <= currentTime) {
+    state.blockedUntil = undefined;
+
+    if (state.attempts.length === 0) {
+      attemptsByClient.delete(clientKey);
+    } else {
+      attemptsByClient.set(clientKey, state);
+    }
+
+    return 0;
+  }
+
+  attemptsByClient.set(clientKey, state);
+  return Math.max(1, Math.ceil((state.blockedUntil - currentTime) / 1000));
+}
+
+function registerFailedAdminLoginAttempt(
+  attemptsByClient: Map<string, AdminLoginAttemptState>,
+  clientKey: string,
+  currentTime: number
+): number {
+  const state = attemptsByClient.get(clientKey) ?? { attempts: [] };
+  state.attempts = state.attempts.filter((attemptTime) => currentTime - attemptTime <= ADMIN_LOGIN_WINDOW_MS);
+  state.attempts.push(currentTime);
+
+  if (state.attempts.length >= ADMIN_LOGIN_MAX_ATTEMPTS) {
+    state.attempts = [];
+    state.blockedUntil = currentTime + ADMIN_LOGIN_BLOCK_MS;
+  }
+
+  attemptsByClient.set(clientKey, state);
+  return state.blockedUntil ? Math.max(1, Math.ceil((state.blockedUntil - currentTime) / 1000)) : 0;
+}
+
+function getHintStateKey(sessionId: string, challengeId: string, roomCode?: string): string {
+  return roomCode ? `${sessionId}:${roomCode}:${challengeId}` : `${sessionId}:global:${challengeId}`;
+}
+
+function getOrCreateHintState(
+  state: Map<string, HintState>,
+  sessionId: string,
+  challengeId: string,
+  roomCode?: string
+): HintState {
+  const key = getHintStateKey(sessionId, challengeId, roomCode);
+  const existing = state.get(key);
+
+  if (existing) {
+    return existing;
+  }
+
+  const next: HintState = {
+    sessionId,
+    challengeId,
+    roomCode,
+    consumedHintsByBug: {}
+  };
+  state.set(key, next);
+  return next;
+}
+
+function appendConsumedHint(state: HintState, bugId: string, hintLevel: HintLevel): HintState {
+  const current = new Set(state.consumedHintsByBug[bugId] ?? []);
+  current.add(hintLevel);
+
+  return {
+    ...state,
+    consumedHintsByBug: {
+      ...state.consumedHintsByBug,
+      [bugId]: [...current].sort((left, right) => left - right) as HintLevel[]
+    }
+  };
 }
 
 function registerStreamClient(
@@ -573,11 +840,12 @@ function registerStreamClient(
 
 function syncChallengeResolvedBugOrder(
   state: Map<string, string[]>,
-  challengeId: string,
+  scope: ChallengeStateScope,
   bugId: string | undefined,
   status: string
 ): string[] {
-  const current = state.get(challengeId) ?? [];
+  const key = getChallengeStateKey(scope.challengeId, scope.roomCode);
+  const current = getResolvedBugOrder(state, scope.challengeId, scope.roomCode);
 
   if (status !== "solved" || !bugId) {
     return current;
@@ -588,25 +856,25 @@ function syncChallengeResolvedBugOrder(
   }
 
   const next = [...current, bugId];
-  state.set(challengeId, next);
+  state.set(key, next);
   return next;
 }
 
 function buildChallengeStateResponse(
-  challengeId: string,
+  scope: ChallengeStateScope,
   state: Map<string, string[]>
 ): ChallengeStateResponse {
-  const challenge = getChallengeById(challengeId);
+  const challenge = getChallengeById(scope.challengeId);
 
   if (!challenge) {
-    throw new Error(`Challenge ${challengeId} nao encontrado.`);
+    throw new Error(`Challenge ${scope.challengeId} nao encontrado.`);
   }
 
-  const resolvedBugOrder = state.get(challengeId) ?? [];
+  const resolvedBugOrder = getResolvedBugOrder(state, scope.challengeId, scope.roomCode);
   const projection = projectResolvedSource(challenge, resolvedBugOrder);
 
   return {
-    challengeId,
+    challengeId: scope.challengeId,
     baseSource: challenge.source,
     resolvedBugOrder,
     resolvedBugDiffs: projection.resolvedBugDiffs,
@@ -653,7 +921,8 @@ function createStatePersister(
   store: InMemorySessionStore,
   _adminStore: InMemoryAdminStore,
   roomStore: InMemoryRoomStore,
-  challengeResolvedBugOrder: Map<string, string[]>
+  challengeResolvedBugOrder: Map<string, string[]>,
+  hintStates: Map<string, HintState>
 ): () => void {
   if (!stateFilePath) {
     return () => {};
@@ -661,10 +930,11 @@ function createStatePersister(
 
   return () => {
     const payload: PersistedApiState = {
-      version: 1,
+      version: 2,
       rooms: roomStore.snapshot(),
       sessions: store.list(),
-      challengeResolvedBugOrder: Object.fromEntries(challengeResolvedBugOrder.entries())
+      challengeResolvedBugOrder: Object.fromEntries(challengeResolvedBugOrder.entries()),
+      hintStates: [...hintStates.values()]
     };
 
     mkdirSync(path.dirname(stateFilePath), { recursive: true });
@@ -678,21 +948,26 @@ function loadPersistedState(stateFilePath: string): PersistedApiState | null {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(stateFilePath, "utf8")) as Partial<PersistedApiState> | null;
+    const parsed = JSON.parse(readFileSync(stateFilePath, "utf8")) as
+      | (Partial<PersistedApiState> & { version?: number; hintStates?: HintState[] })
+      | null;
 
-    if (!parsed || parsed.version !== 1) {
+    const parsedVersion = Number(parsed?.version ?? 0);
+
+    if (!parsed || (parsedVersion !== 1 && parsedVersion !== 2)) {
       return null;
     }
 
     return {
-      version: 1,
+      version: 2,
       rooms: {
         rooms: parsed.rooms?.rooms ?? [],
         participants: parsed.rooms?.participants ?? [],
         activity: parsed.rooms?.activity ?? {}
       },
       sessions: parsed.sessions ?? [],
-      challengeResolvedBugOrder: parsed.challengeResolvedBugOrder ?? {}
+      challengeResolvedBugOrder: parsed.challengeResolvedBugOrder ?? {},
+      hintStates: parsedVersion === 2 ? parsed.hintStates ?? [] : []
     };
   } catch (error) {
     console.warn(

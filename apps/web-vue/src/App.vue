@@ -7,6 +7,7 @@ import type {
   ChallengeStateResponse,
   CodeRange,
   JoinRoomResponse,
+  RequestHintResponse,
   ResolvedBugDiff,
   ResolvedBugEvent,
   RoomActivityEvent,
@@ -111,6 +112,12 @@ const observerState = reactive({
   activity: [] as RoomActivityItem[]
 });
 
+const hintState = reactive({
+  requesting: false,
+  error: "",
+  currentHint: null as RequestHintResponse | null
+});
+
 const progress = computed(() => {
   const solved = sessionProgress.value?.solvedBugIds.length ?? 0;
   const total = challenge.value?.bugs.length ?? 0;
@@ -183,6 +190,7 @@ let eventSource: EventSource | null = null;
 const balloonTimeouts = new Map<string, number>();
 let highlightedBugTimeoutId: number | null = null;
 const resolvedBugModalRef = ref<HTMLElement | null>(null);
+const activeChallengeScopeKey = ref("");
 let previousResolvedBugTrigger: HTMLElement | null = null;
 
 onMounted(async () => {
@@ -223,6 +231,11 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
 async function initializeCurrentView(): Promise<void> {
   closeEventSource();
+
+  if (route.value.view !== "challenge") {
+    activeChallengeScopeKey.value = "";
+    resetChallengeUiState();
+  }
 
   if (route.value.view === "home") {
     await loadChallengeCatalog();
@@ -546,7 +559,21 @@ function formatAttemptRange(selection: CodeRange): string {
   return `L${selection.startLine}:C${selection.startColumn} - L${selection.endLine}:C${selection.endColumn}`;
 }
 
+function formatDifficultyLabel(difficulty: string): string {
+  if (difficulty === "easy") {
+    return "facil";
+  }
+
+  if (difficulty === "medium") {
+    return "medio";
+  }
+
+  return "dificil";
+}
+
 async function loadChallengeState(): Promise<void> {
+  ensureChallengeScope();
+
   if (!currentChallengeId.value) {
     loadError.value = "Nenhum template foi associado a esta sala.";
     loading.value = false;
@@ -561,7 +588,7 @@ async function loadChallengeState(): Promise<void> {
       requestJson<ChallengeDefinition[]>("/api/challenges"),
       requestJson<ChallengeDefinition>(`/api/challenges/${currentChallengeId.value}`),
       fetchSessionProgress(),
-      requestJson<ChallengeStateResponse>(`/api/challenge-state/${currentChallengeId.value}`)
+      requestJson<ChallengeStateResponse>(getChallengeStatePath(currentChallengeId.value))
     ]);
 
     availableChallenges.value = challengeList;
@@ -580,7 +607,7 @@ async function refreshChallengeProjection(): Promise<void> {
     return;
   }
 
-  const challengeStateResponse = await requestJson<ChallengeStateResponse>(`/api/challenge-state/${currentChallengeId.value}`);
+  const challengeStateResponse = await requestJson<ChallengeStateResponse>(getChallengeStatePath(currentChallengeId.value));
   applyChallengeState(challengeStateResponse);
 }
 
@@ -589,6 +616,12 @@ function applyChallengeState(challengeStateResponse: ChallengeStateResponse): vo
   challengeDisplayState.displayedSource = challengeStateResponse.displayedSource;
   challengeDisplayState.resolvedBugOrder = challengeStateResponse.resolvedBugOrder;
   challengeDisplayState.resolvedBugDiffs = challengeStateResponse.resolvedBugDiffs;
+
+  if (hintState.currentHint && challengeStateResponse.resolvedBugOrder.includes(hintState.currentHint.bugId)) {
+    hintState.currentHint = null;
+  }
+
+  syncResolvedBugHistoryFromState(challengeStateResponse);
 }
 
 async function loadChallengeCatalog(): Promise<void> {
@@ -620,7 +653,7 @@ async function loadAdminState(): Promise<void> {
       });
     }
   } catch (error) {
-    adminState.error = getErrorMessage(error, "Nao foi possivel carregar o painel admin.");
+    adminState.error = handleAdminError(error, "Nao foi possivel carregar o painel admin.");
   } finally {
     adminState.loading = false;
   }
@@ -654,6 +687,11 @@ async function submitAdminAuth(): Promise<void> {
   }
 }
 
+function logoutAdmin(): void {
+  clearAdminSession();
+  adminState.error = "";
+}
+
 async function createRoom(): Promise<void> {
   adminState.loading = true;
   adminState.error = "";
@@ -676,7 +714,7 @@ async function createRoom(): Promise<void> {
     adminState.roomPassword = "";
     await loadAdminState();
   } catch (error) {
-    adminState.error = getErrorMessage(error, "Nao foi possivel criar a sala.");
+    adminState.error = handleAdminError(error, "Nao foi possivel criar a sala.");
   } finally {
     adminState.loading = false;
   }
@@ -695,7 +733,7 @@ async function deleteRoom(roomCode: string): Promise<void> {
     });
     await loadAdminState();
   } catch (error) {
-    adminState.error = getErrorMessage(error, "Nao foi possivel deletar a sala.");
+    adminState.error = handleAdminError(error, "Nao foi possivel deletar a sala.");
   } finally {
     adminState.loading = false;
   }
@@ -752,9 +790,46 @@ async function loadObserverState(roomCode: string): Promise<void> {
     observerState.activity = response.items;
   } catch (error) {
     observerState.activity = [];
-    observerState.error = getErrorMessage(error, "Nao foi possivel carregar a atividade da sala.");
+    observerState.error = handleAdminError(error, "Nao foi possivel carregar a atividade da sala.");
   } finally {
     observerState.loading = false;
+  }
+}
+
+async function requestHint(): Promise<void> {
+  if (!currentChallengeId.value) {
+    return;
+  }
+
+  hintState.requesting = true;
+  hintState.error = "";
+
+  try {
+    hintState.currentHint = await requestJson<RequestHintResponse>("/api/hints/request", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        challengeId: currentChallengeId.value,
+        sessionId: roomContext.value.sessionId,
+        roomCode: roomContext.value.roomCode || undefined
+      })
+    });
+  } catch (error) {
+    hintState.error = getErrorMessage(error, "Nao foi possivel carregar a dica.");
+  } finally {
+    hintState.requesting = false;
+  }
+}
+
+class ApiRequestError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
   }
 }
 
@@ -763,7 +838,8 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 
   if (!response.ok) {
-    throw new Error(
+    throw new ApiRequestError(
+      response.status,
       typeof payload?.message === "string" ? payload.message : `Request falhou com status ${response.status}.`
     );
   }
@@ -837,8 +913,108 @@ function closeEventSource(): void {
   eventSource = null;
 }
 
+function clearAdminSession(): void {
+  adminState.token = "";
+  adminState.password = "";
+  adminState.rooms = [];
+  window.localStorage.removeItem(adminTokenStorageKey);
+}
+
+function handleAdminError(error: unknown, fallback: string): string {
+  if (error instanceof ApiRequestError && error.status === 401) {
+    clearAdminSession();
+    return "Sessao admin invalida ou expirada. Entre novamente.";
+  }
+
+  return getErrorMessage(error, fallback);
+}
+
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function getChallengeStatePath(challengeId: string): string {
+  const params = new URLSearchParams();
+
+  if (roomContext.value.roomCode) {
+    params.set("roomCode", roomContext.value.roomCode);
+  }
+
+  const query = params.toString();
+  return query ? `/api/challenge-state/${challengeId}?${query}` : `/api/challenge-state/${challengeId}`;
+}
+
+function ensureChallengeScope(): void {
+  const nextScopeKey = `${roomContext.value.roomCode || "global"}:${currentChallengeId.value || ""}`;
+
+  if (activeChallengeScopeKey.value === nextScopeKey) {
+    return;
+  }
+
+  activeChallengeScopeKey.value = nextScopeKey;
+  resetChallengeUiState();
+}
+
+function resetChallengeUiState(): void {
+  feedback.value = null;
+  submissionError.value = "";
+  selectedRange.value = null;
+  selectedText.value = "";
+  modalOpen.value = false;
+  latestResolvedBug.value = null;
+  resolvedBugHistory.value = [];
+  selectedResolvedHistoryBugId.value = null;
+  selectedResolvedBug.value = null;
+  highlightedBugId.value = null;
+  challengeDisplayState.baseSource = "";
+  challengeDisplayState.displayedSource = "";
+  challengeDisplayState.resolvedBugOrder = [];
+  challengeDisplayState.resolvedBugDiffs = {};
+  hintState.requesting = false;
+  hintState.error = "";
+  hintState.currentHint = null;
+  clearCelebrationTimers();
+  activeBalloons.value = [];
+}
+
+function syncResolvedBugHistoryFromState(challengeStateResponse: ChallengeStateResponse): void {
+  const activeChallenge = challenge.value;
+
+  if (!activeChallenge) {
+    resolvedBugHistory.value = [];
+    selectedResolvedHistoryBugId.value = null;
+    latestResolvedBug.value = null;
+    return;
+  }
+
+  const nextHistory = [...challengeStateResponse.resolvedBugOrder]
+    .reverse()
+    .flatMap((bugId) => {
+      const bug = activeChallenge.bugs.find((candidate) => candidate.id === bugId);
+      const diff = challengeStateResponse.resolvedBugDiffs[bugId];
+
+      if (!bug || !diff) {
+        return [];
+      }
+
+      return [{
+        type: "bug.resolved" as const,
+        challengeId: activeChallenge.id,
+        sessionId: "",
+        bugId: bug.id,
+        title: bug.title,
+        resolvedAt: "",
+        diff,
+        shortDescription: bug.technicalBasis
+      }];
+    });
+
+  resolvedBugHistory.value = nextHistory;
+  latestResolvedBug.value = nextHistory[0] ?? null;
+
+  if (!selectedResolvedHistoryBugId.value || !nextHistory.some((entry) => entry.bugId === selectedResolvedHistoryBugId.value)) {
+    selectedResolvedHistoryBugId.value = nextHistory[0]?.bugId ?? null;
+  }
 }
 
 function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | null {
@@ -860,7 +1036,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
     title: bug.title,
     resolvedAt: new Date().toISOString(),
     diff: result.resolvedBugDiff,
-    shortDescription: bug.expectedFix
+    shortDescription: bug.technicalBasis
   };
 }
 </script>
@@ -910,6 +1086,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
       <section class="panel panel-stack">
         <h2>Login admin</h2>
         <p class="muted-text">Entre com o usuario e a senha configurados no servidor.</p>
+        <p v-if="adminState.token" class="muted-text">Sessao admin ativa. Voce pode entrar novamente ou sair para trocar de conta.</p>
         <p v-if="!adminState.configured" class="error-text">Credenciais admin nao configuradas no servidor.</p>
         <label>
           <span>Usuario</span>
@@ -919,9 +1096,14 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
           <span>Senha</span>
           <input v-model="adminState.password" type="password" autocomplete="current-password" />
         </label>
-        <button :disabled="adminState.loading || !adminState.configured" type="button" @click="submitAdminAuth">
-          Entrar
-        </button>
+        <div class="toolbar-actions">
+          <button :disabled="adminState.loading || !adminState.configured" type="button" @click="submitAdminAuth">
+            {{ adminState.token ? "Entrar novamente" : "Entrar" }}
+          </button>
+          <button v-if="adminState.token" class="secondary-button" :disabled="adminState.loading" type="button" @click="logoutAdmin">
+            Sair
+          </button>
+        </div>
         <p v-if="adminState.error" class="error-text">{{ adminState.error }}</p>
       </section>
 
@@ -1019,7 +1201,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
               <span class="metric-label">{{ activity.status }}</span>
             </div>
             <p class="muted-text">{{ activity.submittedAt }}</p>
-            <p>{{ activity.proposedFix }}</p>
+            <p class="muted-text">Resposta protegida para evitar vazamento.</p>
             <p v-if="activity.bugId" class="muted-text">Bug: {{ activity.bugId }}</p>
           </li>
         </ul>
@@ -1149,6 +1331,24 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
                   <strong>Base tecnica:</strong> {{ feedback.technicalBasis }}
                 </p>
               </template>
+            </section>
+
+            <section class="panel panel-stack">
+              <div class="history-header">
+                <h2>Dicas</h2>
+                <button :disabled="hintState.requesting" class="secondary-button" type="button" @click="requestHint">
+                  {{ hintState.requesting ? 'Carregando dica...' : 'Pedir dica' }}
+                </button>
+              </div>
+              <p class="muted-text">As dicas priorizam bugs mais faceis e nao revelam a correcao literal.</p>
+              <p v-if="hintState.error" class="error-text">{{ hintState.error }}</p>
+              <template v-else-if="hintState.currentHint">
+                <p><strong>Dificuldade:</strong> {{ formatDifficultyLabel(hintState.currentHint.difficulty) }}</p>
+                <p><strong>Categoria:</strong> {{ hintState.currentHint.category }}</p>
+                <p><strong>Nivel:</strong> {{ hintState.currentHint.hintLevel }}</p>
+                <p role="status">{{ hintState.currentHint.message }}</p>
+              </template>
+              <p v-else class="muted-text">Nenhuma dica solicitada ainda.</p>
             </section>
 
             <section v-if="resolvedBugHistory.length > 0" class="panel panel-stack latest-resolved-panel">

@@ -73,6 +73,95 @@ test("POST /api/admin/login autentica o admin configurado", async () => {
   adminToken = payload.token;
 });
 
+
+test("POST /api/admin/login permite autenticar novamente sem bloquear a sessao", async () => {
+  const firstResponse = await fetch(`${baseUrl}/api/admin/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ username: "admin", password: "secret-123" })
+  });
+  const secondResponse = await fetch(`${baseUrl}/api/admin/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ username: "admin", password: "secret-123" })
+  });
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+});
+
+
+test("POST /api/admin/login bloqueia brute force por IP por alguns minutos", async () => {
+  let currentTime = 0;
+  const rateLimitedServer = createServer({ now: () => currentTime });
+  await new Promise<void>((resolve) => {
+    rateLimitedServer.listen(0, () => resolve());
+  });
+
+  const address = rateLimitedServer.address();
+
+  if (!address || typeof address === "string") {
+    throw new Error("Nao foi possivel obter a porta do servidor limitado.");
+  }
+
+  const rateLimitedBaseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const response = await fetch(`${rateLimitedBaseUrl}/api/admin/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ username: "admin", password: "errada" })
+      });
+
+      assert.equal(response.status, 401);
+    }
+
+    const blockedResponse = await fetch(`${rateLimitedBaseUrl}/api/admin/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ username: "admin", password: "errada" })
+    });
+    const blockedPayload = await blockedResponse.json();
+
+    assert.equal(blockedResponse.status, 429);
+    assert.match(String(blockedPayload.message), /Muitas tentativas de login/);
+    assert.equal(blockedResponse.headers.get("retry-after"), "300");
+
+    const blockedValidLoginResponse = await fetch(`${rateLimitedBaseUrl}/api/admin/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ username: "admin", password: "secret-123" })
+    });
+
+    assert.equal(blockedValidLoginResponse.status, 429);
+
+    currentTime += 5 * 60 * 1000 + 1;
+
+    const recoveredResponse = await fetch(`${rateLimitedBaseUrl}/api/admin/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ username: "admin", password: "secret-123" })
+    });
+
+    assert.equal(recoveredResponse.status, 200);
+  } finally {
+    await closeServer(rateLimitedServer);
+  }
+});
+
 test("POST /api/admin/rooms cria sala autenticada e GET /api/admin/rooms lista a sala", async () => {
   const createResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
     method: "POST",
@@ -181,7 +270,143 @@ test("GET /api/challenge-state/:challengeId retorna source derivado e diffs reso
   assert.match(payload.displayedSource, /i < input\.items\.length/);
 });
 
-test("POST /api/submissions registra atividade de sala e GET /api/admin/rooms/:roomCode/activity expoe o feed", async () => {
+test("GET /api/challenge-state/:challengeId isola o historico de resolucoes por sala", async () => {
+  const createRoomAResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma A", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const roomA = await createRoomAResponse.json();
+
+  const createRoomBResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma B", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const roomB = await createRoomBResponse.json();
+
+  await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "session-room-a",
+      roomCode: roomA.roomCode,
+      participantName: "Risso",
+      selection: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
+      proposedFix: "Trocar <= por < porque existe um off-by-one no loop."
+    })
+  });
+
+  const roomAResponse = await fetch(`${baseUrl}/api/challenge-state/checkout-ts-bug-hunt?roomCode=${roomA.roomCode}`);
+  const roomBResponse = await fetch(`${baseUrl}/api/challenge-state/checkout-ts-bug-hunt?roomCode=${roomB.roomCode}`);
+  const roomAPayload = await roomAResponse.json();
+  const roomBPayload = await roomBResponse.json();
+
+  assert.deepEqual(roomAPayload.resolvedBugOrder, ["B002"]);
+  assert.deepEqual(roomBPayload.resolvedBugOrder, []);
+  assert.match(roomAPayload.displayedSource, /i < input\.items\.length/);
+  assert.match(roomBPayload.displayedSource, /i <= input\.items\.length/);
+});
+
+test("POST /api/hints/request prioriza bugs faceis e avanca o nivel da mesma dica", async () => {
+  const createRoomResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma Hint", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const createdRoom = await createRoomResponse.json();
+
+  const firstHintResponse = await fetch(`${baseUrl}/api/hints/request`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "hint-session-1",
+      roomCode: createdRoom.roomCode
+    })
+  });
+  const firstHint = await firstHintResponse.json();
+
+  const secondHintResponse = await fetch(`${baseUrl}/api/hints/request`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "hint-session-1",
+      roomCode: createdRoom.roomCode
+    })
+  });
+  const secondHint = await secondHintResponse.json();
+
+  assert.equal(firstHintResponse.status, 200);
+  assert.equal(firstHint.bugId, "B001");
+  assert.equal(firstHint.difficulty, "easy");
+  assert.equal(firstHint.hintLevel, 1);
+  assert.equal(secondHintResponse.status, 200);
+  assert.equal(secondHint.bugId, "B001");
+  assert.equal(secondHint.hintLevel, 2);
+});
+
+test("POST /api/hints/request ignora bug ja resolvido no contexto da sala", async () => {
+  const createRoomResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ name: "Turma Hint Resolve", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const createdRoom = await createRoomResponse.json();
+
+  await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "hint-solved-session",
+      roomCode: createdRoom.roomCode,
+      participantName: "Risso",
+      selection: { startLine: 32, startColumn: 18, endLine: 32, endColumn: 39 },
+      proposedFix: 'if (!input.userId?.trim()) throw new Error("User id is required");' 
+    })
+  });
+
+  const hintResponse = await fetch(`${baseUrl}/api/hints/request`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "hint-solved-session",
+      roomCode: createdRoom.roomCode
+    })
+  });
+  const hintPayload = await hintResponse.json();
+
+  assert.equal(hintResponse.status, 200);
+  assert.equal(hintPayload.bugId, "B002");
+});
+
+test("POST /api/submissions registra atividade de sala sem expor a resposta literal no feed", async () => {
   const response = await fetch(`${baseUrl}/api/submissions`, {
     method: "POST",
     headers: {
@@ -211,6 +436,7 @@ test("POST /api/submissions registra atividade de sala e GET /api/admin/rooms/:r
   assert.equal(activityPayload.items.length, 1);
   assert.equal(activityPayload.items[0].submittedBy, "Risso");
   assert.equal(activityPayload.items[0].bugId, "B002");
+  assert.equal("proposedFix" in activityPayload.items[0], false);
 });
 
 test("GET /api/admin/rooms/:roomCode/activity exige autenticacao admin", async () => {
@@ -342,7 +568,7 @@ test("GET /api/events transmite bug resolvido por SSE", async () => {
   assert.equal(payload.sessionId, "session-stream");
   assert.equal(payload.bugId, "B002");
   assert.equal(payload.diff.bugId, "B002");
-  assert.match(payload.shortDescription, /Trocar <= por </);
+  assert.equal(payload.shortDescription, "Array vai de 0 ate length - 1.");
 
   stream.close();
 });
@@ -381,6 +607,7 @@ test("GET /api/rooms/:roomCode/events transmite atividade de sala segregada por 
   assert.equal(payload.roomCode, createdRoom.roomCode);
   assert.equal(payload.item.submittedBy, "Risso");
   assert.equal(payload.item.bugId, "B002");
+  assert.equal("proposedFix" in payload.item, false);
 
   stream.close();
 });
@@ -431,6 +658,18 @@ test("createServer reidrata estado persistido depois de reiniciar a API", async 
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ roomCode: createdRoom.roomCode, displayName: "Persist User" })
+  });
+
+  await fetch(`${persistentBaseUrl}/api/hints/request`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "persisted-session",
+      roomCode: createdRoom.roomCode
+    })
   });
 
   await fetch(`${persistentBaseUrl}/api/submissions`, {
@@ -493,9 +732,27 @@ test("createServer reidrata estado persistido depois de reiniciar a API", async 
   const progressPayload = await progressResponse.json();
   assert.deepEqual(progressPayload.solvedBugIds, ["B002"]);
 
-  const challengeStateResponse = await fetch(`${persistentBaseUrl}/api/challenge-state/checkout-ts-bug-hunt`);
+  const challengeStateResponse = await fetch(
+    `${persistentBaseUrl}/api/challenge-state/checkout-ts-bug-hunt?roomCode=${createdRoom.roomCode}`
+  );
   const challengeStatePayload = await challengeStateResponse.json();
   assert.deepEqual(challengeStatePayload.resolvedBugOrder, ["B002"]);
+
+  const hintResponse = await fetch(`${persistentBaseUrl}/api/hints/request`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "persisted-session",
+      roomCode: createdRoom.roomCode
+    })
+  });
+  const hintPayload = await hintResponse.json();
+  assert.equal(hintResponse.status, 200);
+  assert.equal(hintPayload.bugId, "B001");
+  assert.equal(hintPayload.hintLevel, 2);
 
   const activityResponse = await fetch(`${persistentBaseUrl}/api/admin/rooms/${createdRoom.roomCode}/activity`, {
     headers: {

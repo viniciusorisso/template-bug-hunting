@@ -95,7 +95,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 41, startColumn: 14, endLine: 41, endColumn: 30 },
         replacement: 'patch.id?.trim() ?? ""'
-      }
+      },
+      hints: [
+        { level: 1, message: "A construcao do resumo assume que um identificador opcional sempre chega preenchido." },
+        { level: 2, message: "Revise o primeiro acesso ao patch e pense na diferenca entre calar o compilador e realmente proteger o runtime." }
+      ]
     },
     {
       id: "T002",
@@ -109,7 +113,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 42, startColumn: 17, endLine: 42, endColumn: 40 },
         replacement: 'patch.email?.toLowerCase() ?? ""'
-      }
+      },
+      hints: [
+        { level: 1, message: "Existe outra suposicao insegura logo depois do id, agora envolvendo um dado textual do usuario." },
+        { level: 2, message: "Observe a transformacao aplicada ao email e questione o que acontece quando o patch nao traz esse campo." }
+      ]
     },
     {
       id: "T003",
@@ -123,7 +131,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 37, startColumn: 10, endLine: 37, endColumn: 38 },
         replacement: "shortcuts ? [...shortcuts] : []"
-      }
+      },
+      hints: [
+        { level: 1, message: "A funcao utilitaria de shortcuts muda a visao do tipo, mas nao a natureza compartilhada do dado." },
+        { level: 2, message: "Revise o helper que promete um array mutavel e pergunte se ele realmente cria uma nova colecao ou apenas reaproveita a referencia original." }
+      ]
     },
     {
       id: "T004",
@@ -137,7 +149,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 44, startColumn: 17, endLine: 44, endColumn: 57 },
         replacement: "[...(patch.roles ?? [fallbackRole])]"
-      }
+      },
+      hints: [
+        { level: 1, message: "A ordenacao das roles parece inocente, mas hoje pode alterar a colecao recebida de fora." },
+        { level: 2, message: "Procure o ponto em que um array readonly e tratado como mutavel antes de chamar uma operacao que reordena elementos." }
+      ]
     },
     {
       id: "T005",
@@ -151,7 +167,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 47, startColumn: 21, endLine: 47, endColumn: 83 },
         replacement: "[...(cloneShortcuts(patch.preferences?.shortcuts) ?? defaultShortcuts)]"
-      }
+      },
+      hints: [
+        { level: 1, message: "O caminho de fallback dos atalhos reutiliza um valor default que pode acabar carregando historico entre chamadas." },
+        { level: 2, message: "Observe a origem do array que recebe o push de atalho extra quando o usuario nao informa shortcuts personalizadas." }
+      ]
     },
     {
       id: "T006",
@@ -165,7 +185,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 50, startColumn: 17, endLine: 50, endColumn: 81 },
         replacement: 'patch.preferences?.theme ?? "light"'
-      }
+      },
+      hints: [
+        { level: 1, message: "O tema depende de um objeto opcional que esta sendo tratado como se sempre existisse." },
+        { level: 2, message: "Revise a leitura das preferencias e diferencie uma assercao de tipo de uma garantia real de que o objeto veio no payload." }
+      ]
     },
     {
       id: "T007",
@@ -179,7 +203,11 @@ export const typeSystemChallenge: ChallengeDefinition = {
       patch: {
         range: { startLine: 52, startColumn: 22, endLine: 52, endColumn: 47 },
         replacement: '(patch.metadata?.analyticsId ?? "").trim()'
-      }
+      },
+      hints: [
+        { level: 1, message: "A leitura do analyticsId assume uma estrutura aninhada mais confiavel do que o contrato realmente garante." },
+        { level: 2, message: "Olhe para o acesso a metadata e pense em como ler uma chave opcional sem depender de cast para fingir que ela sempre existe." }
+      ]
     },
     {
       id: "T008",
@@ -192,8 +220,13 @@ export const typeSystemChallenge: ChallengeDefinition = {
       technicalBasis: "No ramo default o tipo restante e push, que nao possui address; o bug foi mascarado por um switch nao exaustivo.",
       patch: {
         range: { startLine: 70, startColumn: 5, endLine: 71, endColumn: 33 },
-        replacement: "case \"push\":\n      return notification.token;"
-      }
+        replacement: 'case "push":\n      return notification.token;'
+      },
+
+      hints: [
+        { level: 1, message: "O switch de notificacao nao cobre todos os formatos da union discriminada antes de acessar um campo especifico." },
+        { level: 2, message: "Reveja o ramo final de getNotificationTarget e compare os campos disponiveis em cada variante do tipo Notification." }
+      ]
     }
   ]
 };
