@@ -164,6 +164,11 @@ export type ResolvedBugEvent = {
 
 export type RoomStatus = "active" | "deleted";
 
+export type RoomExecutionSettings = {
+  allowTypecheck?: boolean;
+  allowRuntimeExecution?: boolean;
+};
+
 export type Room = {
   id: string;
   name: string;
@@ -173,6 +178,7 @@ export type Room = {
   status: RoomStatus;
   createdAt: string;
   deletedAt?: string;
+  executionSettings?: RoomExecutionSettings;
 };
 
 export type RoomSummary = Omit<Room, "passwordHash">;
@@ -238,4 +244,55 @@ export type JoinRoomResponse = {
   challengeId: string;
   challengeTitle: string;
   displayName: string;
+  executionSettings?: RoomExecutionSettings;
+};
+
+export type UpdateRoomExecutionSettingsRequest = {
+  allowTypecheck?: boolean;
+  allowRuntimeExecution?: boolean;
+};
+
+export type RoomExecutionSettingsResponse = {
+  roomCode: string;
+  challengeId: string;
+  executionSettings: Required<RoomExecutionSettings>;
+};
+
+export type RoomTypecheckRequest = {
+  participantSessionId: string;
+  challengeId: string;
+  source: string;
+};
+
+export type TypecheckDiagnostic = {
+  code?: string;
+  message: string;
+  file: string;
+  line: number;
+  column: number;
+  category: "error" | "warning" | "message";
+};
+
+export type RoomTypecheckResponse = {
+  ok: boolean;
+  diagnostics: TypecheckDiagnostic[];
+  rawOutput: string;
+  durationMs: number;
+};
+
+export type RoomRunRequest = {
+  participantSessionId: string;
+  challengeId: string;
+  source: string;
+};
+
+export type RoomRunTerminationReason = "completed" | "timeout" | "runtime_error" | "sandbox_violation";
+
+export type RoomRunResponse = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  durationMs: number;
+  terminationReason?: RoomRunTerminationReason;
 };

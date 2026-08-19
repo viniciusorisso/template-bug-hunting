@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { runRuntimeSimulation, runTypecheck, validateExecutionSourceSize } from "./execution.js";
 import {
   appendAttempt,
   getChallengeById,
@@ -28,9 +29,15 @@ import {
   type ResolvedBugEvent,
   type RoomActivityEvent,
   type RoomActivityResponse,
+  type RoomExecutionSettingsResponse,
+  type RoomRunRequest,
+  type RoomRunResponse,
   type RoomStoreSnapshot,
+  type RoomTypecheckRequest,
+  type RoomTypecheckResponse,
   type SessionProgress,
-  type SubmitBugRequest
+  type SubmitBugRequest,
+  type UpdateRoomExecutionSettingsRequest
 } from "@ts-bug-hunt/core";
 
 type StreamClient = {
@@ -227,6 +234,47 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
       return sendJson(response, 201, roomStore.getRoomSummary(room.roomCode));
     }
 
+    if (request.method === "PATCH" && request.url?.startsWith("/api/admin/rooms/") && request.url.endsWith("/execution-settings")) {
+      if (!isAuthorized(request)) {
+        return sendJson(response, 401, { message: "Nao autorizado." });
+      }
+
+      const roomCode = decodeURIComponent(request.url.slice("/api/admin/rooms/".length, -"/execution-settings".length)).trim().toUpperCase();
+      const payload = await readJson<UpdateRoomExecutionSettingsRequest>(request);
+
+      if (!payload || typeof payload !== "object") {
+        return sendJson(response, 400, { message: "Payload JSON invalido." });
+      }
+
+      if (payload.allowTypecheck === undefined && payload.allowRuntimeExecution === undefined) {
+        return sendJson(response, 400, { message: "Nenhuma configuracao de execucao foi informada." });
+      }
+
+      if (payload.allowTypecheck !== undefined && typeof payload.allowTypecheck !== "boolean") {
+        return sendJson(response, 400, { message: "allowTypecheck deve ser boolean." });
+      }
+
+      if (payload.allowRuntimeExecution !== undefined && typeof payload.allowRuntimeExecution !== "boolean") {
+        return sendJson(response, 400, { message: "allowRuntimeExecution deve ser boolean." });
+      }
+
+      const room = roomStore.updateExecutionSettings(roomCode, payload);
+
+      if (!room) {
+        return sendJson(response, 404, { message: "Sala nao encontrada." });
+      }
+
+      persistState();
+
+      const roomSettingsResponse: RoomExecutionSettingsResponse = {
+        roomCode: room.roomCode,
+        challengeId: room.challengeId,
+        executionSettings: normalizeRoomExecutionSettings(room.executionSettings)
+      };
+
+      return sendJson(response, 200, roomSettingsResponse);
+    }
+
     if (request.method === "DELETE" && request.url?.startsWith("/api/admin/rooms/")) {
       if (!isAuthorized(request)) {
         return sendJson(response, 401, { message: "Nao autorizado." });
@@ -292,11 +340,50 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         roomName: room.name,
         displayName: participant.displayName,
         challengeId: challenge.id,
-        challengeTitle: challenge.title
+        challengeTitle: challenge.title,
+        executionSettings: normalizeRoomExecutionSettings(room.executionSettings)
       };
 
       persistState();
       return sendJson(response, 200, joinResponse);
+    }
+
+    if (request.method === "POST" && request.url?.startsWith("/api/rooms/") && request.url.endsWith("/typecheck")) {
+      const roomCode = decodeURIComponent(request.url.slice("/api/rooms/".length, -"/typecheck".length)).trim().toUpperCase();
+      const payload = await readJson<RoomTypecheckRequest>(request);
+      const executionError = validateRoomExecutionRequest(payload, roomCode, roomStore, "typecheck");
+
+      if (executionError) {
+        return sendJson(response, executionError.status, { message: executionError.message });
+      }
+
+      const sizeError = validateExecutionSourceSize(payload.source);
+
+      if (sizeError) {
+        return sendJson(response, 413, { message: sizeError });
+      }
+
+      const result: RoomTypecheckResponse = runTypecheck(payload.source);
+      return sendJson(response, 200, result);
+    }
+
+    if (request.method === "POST" && request.url?.startsWith("/api/rooms/") && request.url.endsWith("/run")) {
+      const roomCode = decodeURIComponent(request.url.slice("/api/rooms/".length, -"/run".length)).trim().toUpperCase();
+      const payload = await readJson<RoomRunRequest>(request);
+      const executionError = validateRoomExecutionRequest(payload, roomCode, roomStore, "run");
+
+      if (executionError) {
+        return sendJson(response, executionError.status, { message: executionError.message });
+      }
+
+      const sizeError = validateExecutionSourceSize(payload.source);
+
+      if (sizeError) {
+        return sendJson(response, 413, { message: sizeError });
+      }
+
+      const result: RoomRunResponse = await runRuntimeSimulation(payload.challengeId, payload.source);
+      return sendJson(response, 200, result);
     }
 
     if (request.method === "GET" && request.url?.startsWith("/api/admin/rooms/") && request.url.endsWith("/activity")) {
@@ -664,7 +751,7 @@ function isValidRange(range: CodeRange): boolean {
 function setCorsHeaders(response: http.ServerResponse): void {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
 }
 
 function sendJson(response: http.ServerResponse, status: number, payload: unknown): void {
@@ -687,6 +774,64 @@ function sendRateLimitedAuthResponse(response: http.ServerResponse, retryAfterSe
 function normalizeRoomCode(roomCode: string | null | undefined): string | undefined {
   const normalized = roomCode?.trim().toUpperCase();
   return normalized ? normalized : undefined;
+}
+
+function normalizeRoomExecutionSettings(settings: { allowTypecheck?: boolean; allowRuntimeExecution?: boolean } | undefined) {
+  return {
+    allowTypecheck: settings?.allowTypecheck ?? false,
+    allowRuntimeExecution: settings?.allowRuntimeExecution ?? false
+  };
+}
+
+function validateRoomExecutionRequest(
+  payload: RoomTypecheckRequest | RoomRunRequest | null,
+  roomCode: string,
+  roomStore: InMemoryRoomStore,
+  mode: "typecheck" | "run"
+): { status: number; message: string } | null {
+  if (!payload || typeof payload !== "object") {
+    return { status: 400, message: "Payload JSON invalido." };
+  }
+
+  if (!payload.participantSessionId?.trim()) {
+    return { status: 400, message: "participantSessionId e obrigatorio." };
+  }
+
+  if (!payload.challengeId?.trim()) {
+    return { status: 400, message: "challengeId e obrigatorio." };
+  }
+
+  if (!payload.source?.trim()) {
+    return { status: 400, message: "source e obrigatorio." };
+  }
+
+  const room = roomStore.getRoom(roomCode);
+
+  if (!room || room.status !== "active") {
+    return { status: 404, message: "Sala nao encontrada ou inativa." };
+  }
+
+  if (room.challengeId !== payload.challengeId.trim()) {
+    return { status: 400, message: "challengeId nao corresponde a sala informada." };
+  }
+
+  const participant = roomStore.getParticipant(payload.participantSessionId.trim());
+
+  if (!participant || participant.roomCode !== roomCode) {
+    return { status: 404, message: "Participante nao encontrado na sala informada." };
+  }
+
+  const settings = normalizeRoomExecutionSettings(room.executionSettings);
+
+  if (mode === "typecheck" && !settings.allowTypecheck) {
+    return { status: 403, message: "Typecheck nao habilitado para esta sala." };
+  }
+
+  if (mode === "run" && !settings.allowRuntimeExecution) {
+    return { status: 403, message: "Execucao nao habilitada para esta sala." };
+  }
+
+  return null;
 }
 
 function getChallengeStateKey(challengeId: string, roomCode?: string): string {
