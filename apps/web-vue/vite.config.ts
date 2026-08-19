@@ -6,7 +6,8 @@ export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
-      "@": fileURLToPath(new URL("./src", import.meta.url))
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@ts-bug-hunt/core": fileURLToPath(new URL("../../packages/core/src/index.ts", import.meta.url))
     }
   },
   server: {
