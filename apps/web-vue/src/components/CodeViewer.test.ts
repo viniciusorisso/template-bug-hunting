@@ -1,9 +1,10 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import CodeViewer from "./CodeViewer.vue";
+import { createMockSelection, getLastMockEditor } from "../test/monacoMock";
 
 describe("CodeViewer", () => {
-  it("emits a multi-line selection from keyboard navigation", async () => {
+  it("emits a multi-line selection from Monaco selection changes", async () => {
     const wrapper = mount(CodeViewer, {
       props: {
         source: "first\nsecond\nthird",
@@ -12,9 +13,8 @@ describe("CodeViewer", () => {
       attachTo: document.body
     });
 
-    const viewer = wrapper.get(".code-viewer");
-    await viewer.trigger("keydown", { key: "ArrowDown" });
-    await viewer.trigger("keydown", { key: "ArrowDown", shiftKey: true });
+    await flushPromises();
+    getLastMockEditor().triggerSelection(createMockSelection(2, 1, 3, 6));
 
     const events = wrapper.emitted("range-selected");
 
@@ -38,9 +38,10 @@ describe("CodeViewer", () => {
       }
     });
 
-    const viewer = wrapper.get(".code-viewer");
-    await viewer.trigger("keydown", { key: "ArrowDown" });
-    await viewer.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    const editor = getLastMockEditor();
+    editor.setPosition({ lineNumber: 2, column: 1 });
+    editor.triggerCommand(3);
 
     expect(wrapper.emitted("range-selected")?.[0]?.[0]).toEqual({
       range: {
@@ -71,11 +72,11 @@ describe("CodeViewer", () => {
       }
     });
 
-    const resolvedLine = wrapper.findAll(".code-line")[1];
-    await resolvedLine.trigger("mouseenter");
+    await flushPromises();
+    getLastMockEditor().triggerMouseMove(2);
+    await flushPromises();
 
-    expect(resolvedLine.classes()).toContain("code-line-resolved");
-    expect(resolvedLine.attributes("data-resolved-bugs")).toBe("B002");
+    expect(wrapper.find(".resolved-popover").exists()).toBe(true);
     expect(wrapper.find(".resolved-popover").text()).toContain("Antes");
     expect(wrapper.find(".resolved-popover").text()).toContain("betaFixed");
   });
@@ -106,8 +107,9 @@ describe("CodeViewer", () => {
       }
     });
 
-    const resolvedLine = wrapper.findAll(".code-line")[1];
-    await resolvedLine.trigger("mouseenter");
+    await flushPromises();
+    getLastMockEditor().triggerMouseMove(2);
+    await flushPromises();
 
     expect(wrapper.find(".resolved-popover").text()).toContain("B002");
     expect(wrapper.find(".resolved-popover").text()).toContain("1/2");
@@ -120,12 +122,7 @@ describe("CodeViewer", () => {
     expect(wrapper.find(".resolved-popover").text()).toContain("betaFinal");
   });
 
-  it("applies a temporary highlight when a resolved bug is targeted", async () => {
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: vi.fn()
-    });
-
+  it("applies a temporary highlight decoration when a resolved bug is targeted", async () => {
     const wrapper = mount(CodeViewer, {
       props: {
         source: "alpha\nbetaFixed",
@@ -144,10 +141,15 @@ describe("CodeViewer", () => {
       }
     });
 
+    await flushPromises();
+    const editor = getLastMockEditor();
+    const revealSpy = vi.spyOn(editor, "revealLineInCenter");
+
     await wrapper.setProps({ highlightedBugId: "B002" });
 
-    const resolvedLine = wrapper.findAll(".code-line")[1];
+    const lastDecorationBatch = editor.decorations.set.mock.calls.at(-1)?.[0] ?? [];
 
-    expect(resolvedLine.classes()).toContain("code-line-highlighted");
+    expect(revealSpy).toHaveBeenCalledWith(2);
+    expect(lastDecorationBatch.some((entry: { options: { className?: string } }) => entry.options.className === "monaco-line-highlighted")).toBe(true);
   });
 });

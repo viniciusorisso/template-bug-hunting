@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, vi } from "vitest";
+import { resetMonacoMock } from "./monacoMock";
+
+vi.mock("@/lib/monaco", async () => await import("./monacoMock"));
 
 const memoryStorage = createMemoryStorage();
 
@@ -15,6 +18,7 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetMonacoMock();
   memoryStorage.clear();
   document.body.innerHTML = "";
 });

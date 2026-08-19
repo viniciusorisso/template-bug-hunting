@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.vue";
+import { getLastMockEditor, getMockEditors } from "./test/monacoMock";
 import { getChallengeById } from "@ts-bug-hunt/core";
 import type {
   ChallengeStateResponse,
@@ -266,14 +267,7 @@ describe("App", () => {
     await wrapper.findAll("button.toolbar-button")[1]!.trigger("click");
     await flushPromises();
 
-    const textarea = document.body.querySelector("textarea");
-
-    if (!(textarea instanceof HTMLTextAreaElement)) {
-      throw new Error("Textarea do modal nao encontrado.");
-    }
-
-    textarea.value = "Trocar <= por < porque existe um off-by-one no loop.";
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    getLastMockEditor().triggerContent("Trocar <= por < porque existe um off-by-one no loop.");
     await flushPromises();
 
     const modalButtons = document.body.querySelectorAll(".modal-actions button");
@@ -281,8 +275,8 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("Bug resolvido: B002");
-    expect(wrapper.find(".code-viewer").text()).toContain("i < input.items.length");
-    expect(wrapper.find('[data-resolved-bugs="B002"]').exists()).toBe(true);
+    expect(wrapper.find(".code-viewer .monaco-editor").text()).toContain("i < input.items.length");
+    expect(getMockEditors()[0]?.decorations.set.mock.calls.at(-1)?.[0]?.length).toBeGreaterThan(0);
     expect(wrapper.text()).toContain("1/10");
     expect(document.body.textContent).toContain("Bug resolvidoB002");
     expect(wrapper.text()).toContain("Historico de resolucoes");
@@ -291,7 +285,8 @@ describe("App", () => {
     const resolvedPanelButton = wrapper.find(".resolved-panel .secondary-button");
     await resolvedPanelButton.trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-resolved-bugs="B002"]').classes()).toContain("code-line-highlighted");
+    const highlightBatch = getMockEditors()[0]?.decorations.set.mock.calls.at(-1)?.[0] ?? [];
+    expect(highlightBatch.some((entry: { options: { className?: string } }) => entry.options.className === "monaco-line-highlighted")).toBe(true);
   });
 
   it("requests a hint and shows the current guidance", async () => {
@@ -387,8 +382,8 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("Bug resolvido: B003");
-    expect(wrapper.find(".code-viewer").text()).toContain("candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()");
-    expect(wrapper.find('[data-resolved-bugs="B003"]').exists()).toBe(true);
+    expect(wrapper.find(".code-viewer .monaco-editor").text()).toContain("candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()");
+    expect(getMockEditors()[0]?.decorations.set.mock.calls.at(-1)?.[0]?.length).toBeGreaterThan(0);
     expect(document.body.querySelector(".celebration-balloon")?.textContent).toContain("B003");
   });
 
@@ -453,7 +448,8 @@ describe("App", () => {
     (modalButtons[1] as HTMLButtonElement | undefined)?.click();
     await flushPromises();
 
-    expect(wrapper.find('[data-resolved-bugs="B003"]').classes()).toContain("code-line-highlighted");
+    const highlightBatch = getMockEditors()[0]?.decorations.set.mock.calls.at(-1)?.[0] ?? [];
+    expect(highlightBatch.some((entry: { options: { className?: string } }) => entry.options.className === "monaco-line-highlighted")).toBe(true);
   });
 
   it("restores focus to the balloon trigger when the resolved-bug modal closes", async () => {
@@ -644,6 +640,87 @@ describe("App", () => {
     await flushPromises();
 
     expect(document.body.querySelector(".celebration-balloon")).toBeNull();
+  });
+
+  it("runs typecheck and runtime when the room allows execution", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    window.history.pushState(
+      {},
+      "",
+      `/?roomCode=ROOM01&roomName=Turma%201&participantSessionId=session-1&participantName=Risso&challengeId=${challenge.id}&allowTypecheck=1&allowRuntimeExecution=1`
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.includes(challengeStatePath)) {
+          return createJsonResponse(emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        if (input.endsWith("/api/rooms/ROOM01/typecheck") && init?.method === "POST") {
+          return createJsonResponse({
+            ok: false,
+            diagnostics: [
+              {
+                code: "TS2322",
+                message: "Type 'number' is not assignable to type 'string'.",
+                file: "challenge.ts",
+                line: 1,
+                column: 7,
+                category: "error"
+              }
+            ],
+            rawOutput: "ERROR TS2322 challenge.ts:1:7 Type 'number' is not assignable to type 'string'.",
+            durationMs: 12
+          });
+        }
+
+        if (input.endsWith("/api/rooms/ROOM01/run") && init?.method === "POST") {
+          return createJsonResponse({
+            ok: true,
+            stdout: '{"primaryRole":"viewer"}\nuser@example.com',
+            stderr: "",
+            exitCode: 0,
+            durationMs: 8,
+            terminationReason: "completed"
+          });
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+
+    const wrapper = mount(App, {
+      attachTo: document.body
+    });
+
+    await flushPromises();
+
+    const typecheckButton = wrapper.findAll("button").find((candidate) => candidate.text() === "Rodar tsc");
+    const runButton = wrapper.findAll("button").find((candidate) => candidate.text() === "Executar codigo");
+
+    await typecheckButton?.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Typecheck:");
+    expect(wrapper.text()).toContain("TS2322");
+
+    await runButton?.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Runtime:");
+    expect(wrapper.text()).toContain("user@example.com");
+    expect(wrapper.text()).toContain('"primaryRole":"viewer"');
   });
 
   it("authenticates admin and lists created rooms", async () => {

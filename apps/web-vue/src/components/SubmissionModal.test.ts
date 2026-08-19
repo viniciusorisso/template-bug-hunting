@@ -1,9 +1,10 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import SubmissionModal from "./SubmissionModal.vue";
+import { getLastMockEditor } from "../test/monacoMock";
 
 describe("SubmissionModal", () => {
-  it("emits update:value when the textarea changes", async () => {
+  it("emits update:value when the Monaco model changes", async () => {
     const wrapper = mount(SubmissionModal, {
       props: {
         open: true,
@@ -15,14 +16,8 @@ describe("SubmissionModal", () => {
       attachTo: document.body
     });
 
-    const textarea = document.body.querySelector("textarea");
-
-    if (!(textarea instanceof HTMLTextAreaElement)) {
-      throw new Error("Textarea nao encontrada.");
-    }
-
-    textarea.value = "Nova correcao";
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    getLastMockEditor().triggerContent("Nova correcao");
 
     expect(wrapper.emitted("update:value")?.[0]).toEqual(["Nova correcao"]);
   });
@@ -39,13 +34,8 @@ describe("SubmissionModal", () => {
       attachTo: document.body
     });
 
-    const textarea = document.body.querySelector("textarea");
-
-    if (!(textarea instanceof HTMLTextAreaElement)) {
-      throw new Error("Textarea nao encontrada.");
-    }
-
-    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+    await flushPromises();
+    getLastMockEditor().triggerCommand(2051);
 
     expect(wrapper.emitted("submit")?.length).toBe(1);
   });

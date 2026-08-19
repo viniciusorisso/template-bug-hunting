@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { getTokenClass, tokenizeTsLine } from "../lib/tokenizeTs";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import type * as Monaco from "monaco-editor";
+import { ensureMonacoSetup, resolveMonacoTheme } from "@/lib/monaco";
 
 const props = defineProps<{
   open: boolean;
@@ -17,8 +18,142 @@ const emit = defineEmits<{
   "update:value": [value: string];
 }>();
 
-const textareaRef = ref<HTMLTextAreaElement | null>(null);
-const highlightedLines = computed(() => props.value.split("\n"));
+const editorHostRef = ref<HTMLElement | null>(null);
+const editorRef = shallowRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+const modelRef = shallowRef<Monaco.editor.ITextModel | null>(null);
+const monacoRef = shallowRef<typeof Monaco | null>(null);
+const isFocused = ref(false);
+const suppressModelSync = ref(false);
+
+const showPlaceholder = computed(() => props.value.trim().length === 0 && !isFocused.value);
+
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) {
+      disposeEditor();
+      return;
+    }
+
+    await nextTick();
+    initializeEditor();
+    await nextTick();
+    editorRef.value?.focus();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.value,
+  (value) => {
+    const model = modelRef.value;
+
+    if (!model || suppressModelSync.value || model.getValue() === value) {
+      return;
+    }
+
+    model.setValue(value);
+  }
+);
+
+watch(
+  () => props.theme,
+  (theme) => {
+    const monaco = monacoRef.value;
+
+    if (!monaco) {
+      return;
+    }
+
+    monaco.editor.setTheme(resolveMonacoTheme(theme));
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  disposeEditor();
+});
+
+function initializeEditor(): void {
+  if (!editorHostRef.value || editorRef.value) {
+    return;
+  }
+
+  const monaco = ensureMonacoSetup();
+  monacoRef.value = monaco;
+  monaco.editor.setTheme(resolveMonacoTheme(props.theme));
+
+  const model = monaco.editor.createModel(
+    props.value,
+    "typescript",
+    monaco.Uri.parse(`inmemory://ts-bug-hunt/submission-${crypto.randomUUID()}.ts`)
+  );
+  modelRef.value = model;
+
+  const editor = monaco.editor.create(editorHostRef.value, {
+    model,
+    automaticLayout: true,
+    contextmenu: true,
+    fontFamily: "Operator Mono, Dank Mono, Cascadia Code, Fira Code, monospace",
+    fontLigatures: true,
+    fontSize: 14,
+    lineHeight: 24,
+    lineNumbers: "off",
+    minimap: { enabled: false },
+    overviewRulerLanes: 0,
+    hideCursorInOverviewRuler: true,
+    renderLineHighlight: "none",
+    scrollBeyondLastLine: false,
+    wordWrap: "on",
+    wrappingIndent: "indent",
+    folding: false,
+    guides: {
+      indentation: false,
+      bracketPairs: false,
+      highlightActiveIndentation: false
+    },
+    padding: {
+      top: 12,
+      bottom: 12
+    }
+  });
+
+  editorRef.value = editor;
+
+  editor.onDidChangeModelContent(() => {
+    const nextValue = model.getValue();
+
+    if (nextValue === props.value) {
+      return;
+    }
+
+    suppressModelSync.value = true;
+    emit("update:value", nextValue);
+    queueMicrotask(() => {
+      suppressModelSync.value = false;
+    });
+  });
+
+  editor.onDidFocusEditorText(() => {
+    isFocused.value = true;
+  });
+
+  editor.onDidBlurEditorText(() => {
+    isFocused.value = false;
+  });
+
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+    handleSubmit();
+  });
+}
+
+function disposeEditor(): void {
+  editorRef.value?.dispose();
+  editorRef.value = null;
+  modelRef.value?.dispose();
+  modelRef.value = null;
+  isFocused.value = false;
+}
 
 function handleSubmit(): void {
   if (!props.value.trim() || props.submitting) {
@@ -26,29 +161,6 @@ function handleSubmit(): void {
   }
 
   emit("submit");
-}
-
-function handleInput(event: Event): void {
-  emit("update:value", (event.target as HTMLTextAreaElement).value);
-}
-
-function handleTextareaKeydown(event: KeyboardEvent): void {
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-    event.preventDefault();
-    handleSubmit();
-  }
-}
-
-function syncScroll(event: Event): void {
-  const target = event.target as HTMLTextAreaElement;
-  const highlight = target.parentElement?.querySelector<HTMLElement>("[data-highlight-layer]");
-
-  if (!highlight) {
-    return;
-  }
-
-  highlight.scrollTop = target.scrollTop;
-  highlight.scrollLeft = target.scrollLeft;
 }
 </script>
 
@@ -76,24 +188,9 @@ function syncScroll(event: Event): void {
 
           <label class="textarea-field">
             <span>Correcao proposta</span>
-            <div class="highlight-input" :data-editor-theme="theme ?? 'operator-mono-dark-modern'">
-              <pre aria-hidden="true" class="highlight-layer" data-highlight-layer><code class="code-content modal-code-content"><template v-for="(line, lineIndex) in highlightedLines" :key="lineIndex"><span
-                    v-for="(token, tokenIndex) in tokenizeTsLine(line)"
-                    :key="`${lineIndex}-${tokenIndex}`"
-                    :class="getTokenClass(token.kind)"
-                  >{{ token.value }}</span><span v-if="lineIndex < highlightedLines.length - 1">{{ "\n" }}</span></template></code></pre>
-              <textarea
-                ref="textareaRef"
-                :value="value"
-                autofocus
-                class="highlight-textarea"
-                rows="8"
-                placeholder="Explique a causa do bug e a correcao esperada"
-                spellcheck="false"
-                @input="handleInput"
-                @keydown="handleTextareaKeydown"
-                @scroll="syncScroll"
-              />
+            <div class="highlight-input monaco-submission-shell" :data-editor-theme="theme ?? 'operator-mono-dark-modern'">
+              <span v-if="showPlaceholder" class="monaco-placeholder">Explique a causa do bug e a correcao esperada</span>
+              <div ref="editorHostRef" class="monaco-submission-editor" />
             </div>
           </label>
         </div>

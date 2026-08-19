@@ -1,11 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import type * as Monaco from "monaco-editor";
 import type { CodeRange, ResolvedBugDiff } from "@ts-bug-hunt/core";
-import { getTokenClass, tokenizeTsLine } from "../lib/tokenizeTs";
+import { ensureMonacoSetup, resolveMonacoTheme } from "@/lib/monaco";
 
 type SelectionPayload = {
   range: CodeRange;
   text: string;
+};
+
+type ActivePopoverState = {
+  lineNumber: number;
+  diff: ResolvedBugDiff;
+  style: {
+    top: string;
+    left: string;
+  };
 };
 
 const props = defineProps<{
@@ -21,12 +31,17 @@ const emit = defineEmits<{
   "range-selected": [payload: SelectionPayload];
 }>();
 
-const lines = computed(() => props.source.split("\n"));
-const focusedLine = ref(props.selectedRange?.startLine ?? 1);
-const keyboardAnchorLine = ref<number | null>(null);
 const viewerRef = ref<HTMLElement | null>(null);
+const editorHostRef = ref<HTMLElement | null>(null);
 const hoveredLineNumber = ref<number | null>(null);
 const activePopoverDiffIndex = ref(0);
+const viewportRevision = ref(0);
+const editorRef = shallowRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+const modelRef = shallowRef<Monaco.editor.ITextModel | null>(null);
+const decorationsRef = shallowRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
+const monacoRef = shallowRef<typeof Monaco | null>(null);
+const suppressSelectionEvents = ref(false);
+
 const lineDiffMap = computed(() => {
   const map = new Map<number, ResolvedBugDiff[]>();
 
@@ -46,21 +61,96 @@ const lineDiffMap = computed(() => {
   return map;
 });
 
-watch(
-  () => props.selectedRange,
-  (range) => {
-    focusedLine.value = range?.startLine ?? 1;
+const activePopoverState = computed<ActivePopoverState | null>(() => {
+  viewportRevision.value;
 
-    if (!range) {
-      keyboardAnchorLine.value = null;
+  const lineNumber = hoveredLineNumber.value;
+  const editor = editorRef.value;
+
+  if (!lineNumber || !editor) {
+    return null;
+  }
+
+  const diff = getActiveResolvedDiff(lineNumber);
+
+  if (!diff) {
+    return null;
+  }
+
+  const position = editor.getScrolledVisiblePosition({ lineNumber, column: 1 });
+
+  if (!position) {
+    return null;
+  }
+
+  return {
+    lineNumber,
+    diff,
+    style: {
+      top: `${position.top + position.height + 8}px`,
+      left: "72px"
     }
+  };
+});
+
+onMounted(() => {
+  initializeEditor();
+});
+
+onBeforeUnmount(() => {
+  disposeEditor();
+});
+
+watch(
+  () => props.source,
+  (source) => {
+    const model = modelRef.value;
+
+    if (!model || model.getValue() === source) {
+      return;
+    }
+
+    model.setValue(source);
+    viewportRevision.value += 1;
+  }
+);
+
+watch(
+  () => props.theme,
+  (theme) => {
+    const monaco = monacoRef.value;
+
+    if (!monaco) {
+      return;
+    }
+
+    monaco.editor.setTheme(resolveMonacoTheme(theme));
   },
   { immediate: true }
 );
 
 watch(
+  () => props.selectedRange,
+  (range) => {
+    syncSelection(range);
+    applyDecorations();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.resolvedBugDiffs,
+  () => {
+    applyDecorations();
+  },
+  { deep: true }
+);
+
+watch(
   () => props.highlightedBugId,
   async (bugId) => {
+    applyDecorations();
+
     if (!bugId) {
       return;
     }
@@ -71,240 +161,253 @@ watch(
       return;
     }
 
-    focusedLine.value = diff.appliedRange.startLine;
+    hoveredLineNumber.value = diff.appliedRange.startLine;
+    activePopoverDiffIndex.value = 0;
+    editorRef.value?.revealLineInCenter(diff.appliedRange.startLine);
     await nextTick();
-    viewerRef.value?.focus();
-    viewerRef.value
-      ?.querySelector<HTMLElement>(`[data-line="${diff.appliedRange.startLine}"]`)
-      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    viewportRevision.value += 1;
   }
 );
 
-function handleMouseUp(): void {
-  const selection = window.getSelection();
-  const selectedText = selection?.toString() ?? "";
-
-  if (!selection || selection.rangeCount === 0 || selectedText.trim().length === 0) {
-    emit("clear-selection");
+function initializeEditor(): void {
+  if (!editorHostRef.value || editorRef.value) {
     return;
   }
 
-  const range = selection.getRangeAt(0);
-  const startLineElement = getLineElement(range.startContainer);
-  const endLineElement = getLineElement(range.endContainer);
+  const monaco = ensureMonacoSetup();
+  monacoRef.value = monaco;
+  monaco.editor.setTheme(resolveMonacoTheme(props.theme));
 
-  if (!startLineElement || !endLineElement) {
-    emit("clear-selection");
-    return;
-  }
+  const model = monaco.editor.createModel(
+    props.source,
+    "typescript",
+    monaco.Uri.parse(`inmemory://ts-bug-hunt/${crypto.randomUUID()}.ts`)
+  );
+  modelRef.value = model;
 
-  const selectionRange: CodeRange = normalizeRange({
-    startLine: Number(startLineElement.dataset.line),
-    startColumn: getColumn(range.startContainer, range.startOffset, startLineElement),
-    endLine: Number(endLineElement.dataset.line),
-    endColumn: getColumn(range.endContainer, range.endOffset, endLineElement)
+  const editor = monaco.editor.create(editorHostRef.value, {
+    model,
+    readOnly: true,
+    automaticLayout: true,
+    contextmenu: false,
+    fontFamily: "Operator Mono, Dank Mono, Cascadia Code, Fira Code, monospace",
+    fontLigatures: true,
+    fontSize: 14,
+    lineHeight: 24,
+    lineNumbers: "on",
+    lineDecorationsWidth: 12,
+    minimap: { enabled: false },
+    overviewRulerLanes: 0,
+    hideCursorInOverviewRuler: true,
+    renderLineHighlight: "all",
+    renderWhitespace: "selection",
+    scrollBeyondLastLine: false,
+    selectionHighlight: false,
+    occurrencesHighlight: "off",
+    wordWrap: "off",
+    folding: false,
+    guides: {
+      indentation: true,
+      bracketPairs: false,
+      highlightActiveIndentation: true
+    },
+    padding: {
+      top: 14,
+      bottom: 14
+    }
   });
 
-  focusedLine.value = selectionRange.endLine;
-  keyboardAnchorLine.value = null;
-  emitSelection(selectionRange, selectedText);
+  editorRef.value = editor;
+  decorationsRef.value = editor.createDecorationsCollection();
+
+  editor.onDidChangeCursorSelection((event) => {
+    if (suppressSelectionEvents.value) {
+      return;
+    }
+
+    if (event.selection.isEmpty()) {
+      emit("clear-selection");
+      return;
+    }
+
+    emitSelection(event.selection);
+  });
+
+  editor.onMouseMove((event: Monaco.editor.IEditorMouseEvent) => {
+    setHoveredBug(event.target.position?.lineNumber ?? null);
+  });
+
+  editor.onMouseLeave(() => {
+    clearHoveredBug();
+  });
+
+  editor.onDidScrollChange(() => {
+    viewportRevision.value += 1;
+  });
+
+  editor.onDidLayoutChange(() => {
+    viewportRevision.value += 1;
+  });
+
+  editor.addCommand(monaco.KeyCode.Enter, () => {
+    selectFocusedLine();
+  });
+
+  editor.addCommand(monaco.KeyCode.Space, () => {
+    selectFocusedLine();
+  });
+
+  syncSelection(props.selectedRange);
+  applyDecorations();
 }
 
-function handleKeyboardSelection(event: KeyboardEvent): void {
-  const maxLine = lines.value.length;
+function disposeEditor(): void {
+  decorationsRef.value?.clear();
+  decorationsRef.value = null;
+  editorRef.value?.dispose();
+  editorRef.value = null;
+  modelRef.value?.dispose();
+  modelRef.value = null;
+}
 
-  if (maxLine === 0) {
+function syncSelection(range: CodeRange | null): void {
+  const editor = editorRef.value;
+  const monaco = monacoRef.value;
+
+  if (!editor || !monaco) {
     return;
   }
 
-  if (event.key === "Escape") {
-    keyboardAnchorLine.value = null;
-    hoveredLineNumber.value = null;
-    activePopoverDiffIndex.value = 0;
-    emit("clear-selection");
+  if (!range) {
+    const position = editor.getPosition() ?? { lineNumber: 1, column: 1 };
+    const selection = new monaco.Selection(position.lineNumber, position.column, position.lineNumber, position.column);
+
+    if (editor.getSelection()?.equalsSelection(selection)) {
+      return;
+    }
+
+    withSuppressedSelection(() => {
+      editor.setSelection(selection);
+    });
     return;
   }
 
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    keyboardAnchorLine.value = focusedLine.value;
-    emitSelection(buildLineRange(focusedLine.value, focusedLine.value), getSelectedText(focusedLine.value, focusedLine.value));
+  const selection = new monaco.Selection(range.startLine, range.startColumn, range.endLine, range.endColumn);
+
+  if (editor.getSelection()?.equalsSelection(selection)) {
     return;
   }
 
-  const movement = getNextLine(event, maxLine);
+  withSuppressedSelection(() => {
+    editor.setSelection(selection);
+    editor.revealRangeInCenter(selection);
+  });
+}
 
-  if (movement === null) {
+function withSuppressedSelection(callback: () => void): void {
+  suppressSelectionEvents.value = true;
+  callback();
+  queueMicrotask(() => {
+    suppressSelectionEvents.value = false;
+  });
+}
+
+function emitSelection(selection: Monaco.Selection): void {
+  const model = modelRef.value;
+
+  if (!model) {
     return;
   }
 
-  event.preventDefault();
-  const previousLine = focusedLine.value;
-  focusedLine.value = movement;
-
-  if (getResolvedDiffsForLine(focusedLine.value).length > 0) {
-    hoveredLineNumber.value = focusedLine.value;
-    activePopoverDiffIndex.value = 0;
-  } else {
-    hoveredLineNumber.value = null;
-    activePopoverDiffIndex.value = 0;
-  }
-
-  if (event.shiftKey) {
-    keyboardAnchorLine.value ??= previousLine;
-    emitSelection(
-      buildLineRange(keyboardAnchorLine.value, focusedLine.value),
-      getSelectedText(keyboardAnchorLine.value, focusedLine.value)
-    );
-    return;
-  }
-
-  keyboardAnchorLine.value = null;
-}
-
-function getNextLine(event: KeyboardEvent, maxLine: number): number | null {
-  switch (event.key) {
-    case "ArrowDown":
-      return Math.min(focusedLine.value + 1, maxLine);
-    case "ArrowUp":
-      return Math.max(focusedLine.value - 1, 1);
-    case "Home":
-      return 1;
-    case "End":
-      return maxLine;
-    default:
-      return null;
-  }
-}
-
-function buildLineRange(startLine: number, endLine: number): CodeRange {
-  const normalizedStart = Math.min(startLine, endLine);
-  const normalizedEnd = Math.max(startLine, endLine);
-
-  return {
-    startLine: normalizedStart,
-    startColumn: 1,
-    endLine: normalizedEnd,
-    endColumn: getLineEndColumn(normalizedEnd)
-  };
-}
-
-function getSelectedText(startLine: number, endLine: number): string {
-  const normalizedStart = Math.min(startLine, endLine);
-  const normalizedEnd = Math.max(startLine, endLine);
-  return lines.value.slice(normalizedStart - 1, normalizedEnd).join("\n");
-}
-
-function getLineEndColumn(lineNumber: number): number {
-  return (lines.value[lineNumber - 1]?.length ?? 0) + 1;
-}
-
-function emitSelection(range: CodeRange, text: string): void {
   emit("range-selected", {
-    range,
-    text
+    range: {
+      startLine: selection.startLineNumber,
+      startColumn: selection.startColumn,
+      endLine: selection.endLineNumber,
+      endColumn: selection.endColumn
+    },
+    text: model.getValueInRange(selection)
   });
 }
 
-function getLineElement(node: Node): HTMLElement | null {
-  let current: Node | null = node;
+function selectFocusedLine(): void {
+  const editor = editorRef.value;
+  const model = modelRef.value;
+  const monaco = monacoRef.value;
+  const position = editor?.getPosition();
 
-  while (current) {
-    if (current instanceof HTMLElement && current.dataset.line) {
-      return current;
+  if (!editor || !model || !monaco || !position) {
+    return;
+  }
+
+  const selection = new monaco.Selection(
+    position.lineNumber,
+    1,
+    position.lineNumber,
+    model.getLineMaxColumn(position.lineNumber)
+  );
+
+  withSuppressedSelection(() => {
+    editor.setSelection(selection);
+  });
+  emitSelection(selection);
+}
+
+function applyDecorations(): void {
+  const decorations = decorationsRef.value;
+  const monaco = monacoRef.value;
+
+  if (!decorations || !monaco) {
+    return;
+  }
+
+  const nextDecorations: Monaco.editor.IModelDeltaDecoration[] = [];
+
+  for (const diff of Object.values(props.resolvedBugDiffs ?? {})) {
+    for (const lineId of diff.resolvedLineIds) {
+      const lineNumber = Number(lineId);
+
+      if (!Number.isInteger(lineNumber) || lineNumber <= 0) {
+        continue;
+      }
+
+      nextDecorations.push({
+        range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+        options: {
+          isWholeLine: true,
+          className: "monaco-line-resolved",
+          linesDecorationsClassName: "monaco-line-resolved-gutter"
+        }
+      });
     }
-
-    current = current.parentNode;
   }
 
-  return null;
-}
+  if (props.highlightedBugId && props.resolvedBugDiffs?.[props.highlightedBugId]) {
+    const highlightedDiff = props.resolvedBugDiffs[props.highlightedBugId];
 
-function getColumn(node: Node, offset: number, lineElement: HTMLElement): number {
-  const content = lineElement.querySelector("[data-code-content]");
+    for (const lineId of highlightedDiff.resolvedLineIds) {
+      const lineNumber = Number(lineId);
 
-  if (!content) {
-    return 1;
-  }
+      if (!Number.isInteger(lineNumber) || lineNumber <= 0) {
+        continue;
+      }
 
-  let column = 1;
-
-  if (node === content) {
-    return offset + 1;
-  }
-
-  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-  let currentNode = walker.nextNode();
-
-  while (currentNode) {
-    if (currentNode === node) {
-      return column + offset;
+      nextDecorations.push({
+        range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+        options: {
+          isWholeLine: true,
+          className: "monaco-line-highlighted",
+          linesDecorationsClassName: "monaco-line-highlighted-gutter"
+        }
+      });
     }
-
-    column += currentNode.textContent?.length ?? 0;
-    currentNode = walker.nextNode();
   }
 
-  return column;
-}
-
-function normalizeRange(range: CodeRange): CodeRange {
-  const startsAfterEnd =
-    range.startLine > range.endLine ||
-    (range.startLine === range.endLine && range.startColumn > range.endColumn);
-
-  if (!startsAfterEnd) {
-    return range;
-  }
-
-  return {
-    startLine: range.endLine,
-    startColumn: range.endColumn,
-    endLine: range.startLine,
-    endColumn: range.startColumn
-  };
-}
-
-function isLineSelected(lineNumber: number): boolean {
-  if (!props.selectedRange) {
-    return false;
-  }
-
-  return lineNumber >= props.selectedRange.startLine && lineNumber <= props.selectedRange.endLine;
+  decorations.set(nextDecorations);
 }
 
 function getResolvedDiffsForLine(lineNumber: number): ResolvedBugDiff[] {
   return lineDiffMap.value.get(lineNumber) ?? [];
-}
-
-function isLineHighlighted(lineNumber: number): boolean {
-  if (!props.highlightedBugId) {
-    return false;
-  }
-
-  return getResolvedDiffsForLine(lineNumber).some((diff) => diff.bugId === props.highlightedBugId);
-}
-
-function isPopoverVisible(lineNumber: number): boolean {
-  return hoveredLineNumber.value === lineNumber && getResolvedDiffsForLine(lineNumber).length > 0;
-}
-
-function setHoveredBug(lineNumber: number): void {
-  if (getResolvedDiffsForLine(lineNumber).length === 0) {
-    hoveredLineNumber.value = null;
-    activePopoverDiffIndex.value = 0;
-    return;
-  }
-
-  hoveredLineNumber.value = lineNumber;
-  activePopoverDiffIndex.value = 0;
-}
-
-function clearHoveredBug(lineNumber: number): void {
-  if (hoveredLineNumber.value === lineNumber) {
-    hoveredLineNumber.value = null;
-    activePopoverDiffIndex.value = 0;
-  }
 }
 
 function getActiveResolvedDiff(lineNumber: number): ResolvedBugDiff | null {
@@ -315,6 +418,24 @@ function getActiveResolvedDiff(lineNumber: number): ResolvedBugDiff | null {
   }
 
   return diffs[activePopoverDiffIndex.value] ?? diffs[0] ?? null;
+}
+
+function setHoveredBug(lineNumber: number | null): void {
+  if (!lineNumber || getResolvedDiffsForLine(lineNumber).length === 0) {
+    clearHoveredBug();
+    return;
+  }
+
+  if (hoveredLineNumber.value !== lineNumber) {
+    activePopoverDiffIndex.value = 0;
+  }
+
+  hoveredLineNumber.value = lineNumber;
+}
+
+function clearHoveredBug(): void {
+  hoveredLineNumber.value = null;
+  activePopoverDiffIndex.value = 0;
 }
 
 function showPreviousResolvedDiff(lineNumber: number): void {
@@ -343,75 +464,42 @@ function showNextResolvedDiff(lineNumber: number): void {
     ref="viewerRef"
     class="code-viewer"
     :data-editor-theme="theme ?? 'operator-mono-dark-modern'"
-    tabindex="0"
     role="region"
     aria-label="Editor somente leitura do desafio"
     aria-describedby="code-viewer-help"
-    @keydown="handleKeyboardSelection"
-    @mouseup="handleMouseUp"
   >
     <p id="code-viewer-help" class="sr-only">
-      Use as setas para navegar entre as linhas. Use Shift com as setas para selecionar varias linhas.
-      Pressione Enter ou espaco para selecionar a linha atual.
+      Use selecao nativa do editor Monaco para marcar trechos do desafio e revisar bugs resolvidos.
     </p>
 
+    <div ref="editorHostRef" class="monaco-host" />
+
     <div
-      v-for="(line, index) in lines"
-      :key="index"
-      :class="[
-        'code-line',
-        {
-          'code-line-selected': isLineSelected(index + 1),
-          'code-line-focused': focusedLine === index + 1,
-          'code-line-resolved': getResolvedDiffsForLine(index + 1).length > 0,
-          'code-line-highlighted': isLineHighlighted(index + 1)
-        }
-      ]"
-      :data-line="index + 1"
-      :data-resolved-bugs="getResolvedDiffsForLine(index + 1).map((diff) => diff.bugId).join(',')"
-      @mouseenter="setHoveredBug(index + 1)"
-      @mouseleave="clearHoveredBug(index + 1)"
-      @focusin="setHoveredBug(index + 1)"
-      @focusout="clearHoveredBug(index + 1)"
+      v-if="activePopoverState"
+      class="resolved-popover"
+      :style="activePopoverState.style"
+      role="note"
+      aria-live="polite"
     >
-      <span :class="['line-number', { 'line-number-resolved': getResolvedDiffsForLine(index + 1).length > 0 }]">
-        {{ index + 1 }}
-      </span>
-      <code data-code-content class="code-content">
-        <span
-          v-for="(token, tokenIndex) in tokenizeTsLine(line)"
-          :key="`${index}-${tokenIndex}`"
-          :class="getTokenClass(token.kind)"
-        >
-          {{ token.value }}
+      <div class="resolved-popover-header">
+        <strong>{{ activePopoverState.diff.bugId }}</strong>
+        <span class="metric-label">Trecho resolvido</span>
+      </div>
+      <div v-if="getResolvedDiffsForLine(activePopoverState.lineNumber).length > 1" class="resolved-popover-nav">
+        <button type="button" class="popover-nav-button" @click="showPreviousResolvedDiff(activePopoverState.lineNumber)">Anterior</button>
+        <span class="metric-label">
+          {{ activePopoverDiffIndex + 1 }}/{{ getResolvedDiffsForLine(activePopoverState.lineNumber).length }}
         </span>
-      </code>
-      <div
-        v-if="isPopoverVisible(index + 1) && getActiveResolvedDiff(index + 1)"
-        class="resolved-popover"
-        role="note"
-        aria-live="polite"
-      >
-        <div class="resolved-popover-header">
-          <strong>{{ getActiveResolvedDiff(index + 1)?.bugId }}</strong>
-          <span class="metric-label">Trecho resolvido</span>
+        <button type="button" class="popover-nav-button" @click="showNextResolvedDiff(activePopoverState.lineNumber)">Proximo</button>
+      </div>
+      <div class="resolved-popover-grid">
+        <div>
+          <span class="metric-label">Antes</span>
+          <pre class="resolved-popover-code"><code>{{ activePopoverState.diff.beforeText }}</code></pre>
         </div>
-        <div v-if="getResolvedDiffsForLine(index + 1).length > 1" class="resolved-popover-nav">
-          <button type="button" class="popover-nav-button" @click="showPreviousResolvedDiff(index + 1)">Anterior</button>
-          <span class="metric-label">
-            {{ activePopoverDiffIndex + 1 }}/{{ getResolvedDiffsForLine(index + 1).length }}
-          </span>
-          <button type="button" class="popover-nav-button" @click="showNextResolvedDiff(index + 1)">Proximo</button>
-        </div>
-        <div class="resolved-popover-grid">
-          <div>
-            <span class="metric-label">Antes</span>
-            <pre class="resolved-popover-code"><code>{{ getActiveResolvedDiff(index + 1)?.beforeText }}</code></pre>
-          </div>
-          <div>
-            <span class="metric-label">Depois</span>
-            <pre class="resolved-popover-code"><code>{{ getActiveResolvedDiff(index + 1)?.afterText }}</code></pre>
-          </div>
+        <div>
+          <span class="metric-label">Depois</span>
+          <pre class="resolved-popover-code"><code>{{ activePopoverState.diff.afterText }}</code></pre>
         </div>
       </div>
     </div>

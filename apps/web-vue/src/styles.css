@@ -785,3 +785,66 @@ button:disabled {
 .template-item {
   align-items: start;
 }
+
+.code-viewer {
+  position: relative;
+  overflow: hidden;
+  gap: 0;
+  padding: 0;
+}
+
+.monaco-host {
+  height: 100%;
+  min-height: 0;
+}
+
+.code-viewer .monaco-editor,
+.code-viewer .monaco-editor .margin,
+.code-viewer .monaco-editor .monaco-editor-background,
+.highlight-input .monaco-editor,
+.highlight-input .monaco-editor .margin,
+.highlight-input .monaco-editor .monaco-editor-background {
+  background: var(--editor-bg);
+}
+
+.monaco-editor .view-overlays .monaco-line-resolved {
+  background: var(--editor-line-resolved-bg);
+  box-shadow: inset 3px 0 0 var(--editor-line-resolved-accent);
+}
+
+.monaco-editor .view-overlays .monaco-line-highlighted {
+  background: var(--editor-line-highlighted-bg);
+  box-shadow: inset 3px 0 0 var(--editor-line-highlighted-accent), inset 0 0 0 1px var(--editor-line-highlighted-ring);
+}
+
+.monaco-editor .margin-view-overlays .monaco-line-resolved-gutter {
+  margin-left: 10px;
+  border-left: 3px solid var(--editor-line-resolved-accent);
+}
+
+.monaco-editor .margin-view-overlays .monaco-line-highlighted-gutter {
+  margin-left: 10px;
+  border-left: 3px solid var(--editor-line-highlighted-accent);
+}
+
+.monaco-submission-shell {
+  position: relative;
+  min-height: 220px;
+}
+
+.monaco-submission-editor {
+  min-height: 220px;
+  height: 220px;
+}
+
+.monaco-placeholder {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  z-index: 2;
+  color: var(--editor-placeholder);
+  font-family: var(--editor-font-family);
+  font-size: 14px;
+  line-height: 1.65;
+  pointer-events: none;
+}
