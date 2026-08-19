@@ -4,6 +4,7 @@
     "jsx": "preserve",
     "baseUrl": ".",
     "paths": {
+      "@ts-bug-hunt/core": ["../../packages/core/src/index.ts"],
       "@/*": [
         "src/*"
       ]
