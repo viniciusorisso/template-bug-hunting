@@ -244,6 +244,9 @@ export type RoomActivityItem = {
   submittedBy: string;
   submittedAt: string;
   submittedCode?: string;
+  submittedOriginalCode?: string;
+  submittedServerDiff?: ServerDiff;
+  submittedSelection?: CodeRange;
 };
 
 export type RoomActivityResponse = {
@@ -254,7 +257,7 @@ export type RoomActivityResponse = {
 export type RoomActivityEvent = {
   type: "room.activity";
   roomCode: string;
-  item: Omit<RoomActivityItem, "submittedCode">;
+  item: Omit<RoomActivityItem, "submittedCode" | "submittedOriginalCode" | "submittedServerDiff" | "submittedSelection">;
 };
 
 export type RoomExecutionSettingsEvent = {

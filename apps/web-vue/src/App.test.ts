@@ -1058,7 +1058,14 @@ describe("App", () => {
         status: "solved",
         submittedBy: "Risso",
         submittedAt: "2026-08-18T00:00:00.000Z",
-        submittedCode: "for (let i = 0; i < input.items.length; i++)"
+        submittedCode: "for (let i = 0; i < input.items.length; i++)",
+        submittedOriginalCode: "for (let i = 0; i <= input.items.length; i++)",
+        submittedServerDiff: {
+          operations: [{ type: "replace", originalStartLine: 1, originalEndLine: 1, replacementText: "for (let i = 0; i < input.items.length; i++)" }],
+          addedLines: 1,
+          removedLines: 1
+        },
+        submittedSelection: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 44 }
       }
     ];
 
@@ -1100,8 +1107,17 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Sala ROOM01");
     expect(wrapper.text()).toContain("Risso");
     expect(wrapper.text()).toContain("Ana");
+    expect(wrapper.text()).toContain("Antes");
+    expect(wrapper.text()).toContain("Depois");
+    expect(wrapper.text()).toContain("for (let i = 0; i <= input.items.length; i++)");
     expect(wrapper.text()).toContain("Ver codigo enviado");
     expect(wrapper.text()).toContain("for (let i = 0; i < input.items.length; i++)");
+
+    await wrapper.findAll("button").find((candidate) => candidate.text() === "Abrir comparativo")?.trigger("click");
+    await flushPromises();
+
+    expect(document.body.textContent).toContain("Visualizar tentativa");
+    expect(document.body.querySelector(".diff-monaco-diff-editor")).not.toBeNull();
     expect(wrapper.text()).not.toContain("Trocar <= por <.");
   });
 });

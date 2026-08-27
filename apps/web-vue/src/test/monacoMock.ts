@@ -323,8 +323,12 @@ const mockMonaco = {
       const root = document.createElement("div");
       root.className = "monaco-diff-editor";
       host.append(root);
+      const originalEditor = { revealLineInCenter: vi.fn() };
+      const modifiedEditor = { revealLineInCenter: vi.fn() };
       return {
         setModel: vi.fn(),
+        getOriginalEditor: () => originalEditor,
+        getModifiedEditor: () => modifiedEditor,
         dispose: vi.fn(() => root.remove())
       };
     },

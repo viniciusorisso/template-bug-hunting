@@ -269,6 +269,12 @@ function initializeDiffEditors(): void {
   });
   diffEditorRef.value = diffEditor;
   diffEditor.setModel({ original: originalModel, modified: modifiedModel });
+
+  if (props.selectedRange) {
+    diffEditor.getOriginalEditor().revealLineInCenter(props.selectedRange.startLine);
+    diffEditor.getModifiedEditor().revealLineInCenter(props.selectedRange.startLine);
+  }
+
   monaco.editor.setTheme(resolveMonacoTheme(props.theme));
 }
 

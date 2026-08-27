@@ -41,6 +41,9 @@ type RecordActivityInput = {
   submittedBy: string;
   submittedAt: string;
   submittedCode?: string;
+  submittedOriginalCode?: string;
+  submittedServerDiff?: import("../types.js").ServerDiff;
+  submittedSelection?: import("../types.js").CodeRange;
 };
 
 export class InMemoryAdminStore {
@@ -182,7 +185,10 @@ export class InMemoryRoomStore {
       status: input.status,
       submittedBy: input.submittedBy,
       submittedAt: input.submittedAt,
-      submittedCode: input.submittedCode
+      submittedCode: input.submittedCode,
+      submittedOriginalCode: input.submittedOriginalCode,
+      submittedServerDiff: input.submittedServerDiff,
+      submittedSelection: input.submittedSelection
     };
 
     const current = this.activity.get(input.roomCode) ?? [];
