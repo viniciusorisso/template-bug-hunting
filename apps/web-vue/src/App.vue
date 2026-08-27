@@ -92,6 +92,7 @@ const notification = ref<NotificationBanner | null>(null);
 const activeBalloons = ref<CelebrationBalloonState[]>([]);
 const selectedResolvedBug = ref<CelebrationBalloonState | null>(null);
 const selectedAttempt = ref<SubmissionAttempt | null>(null);
+const selectedAdminActivity = ref<RoomActivityItem | null>(null);
 const highlightedBugId = ref<string | null>(null);
 const latestResolvedBug = ref<ResolvedBugEvent | null>(null);
 const resolvedBugHistory = ref<ResolvedBugEvent[]>([]);
@@ -415,6 +416,16 @@ function closeAttemptPreview(): void {
   selectedAttempt.value = null;
 }
 
+function openAdminActivityPreview(activity: RoomActivityItem): void {
+  if (activity.submittedOriginalCode && activity.submittedCode) {
+    selectedAdminActivity.value = activity;
+  }
+}
+
+function closeAdminActivityPreview(): void {
+  selectedAdminActivity.value = null;
+}
+
 function dismissBalloon(balloonId: string): void {
   const timeoutId = balloonTimeouts.get(balloonId);
 
@@ -667,6 +678,25 @@ function getAttemptDiffPreview(attempt: SessionProgress["attempts"][number]): At
   }
 
   const originalLines = attempt.originalText.split("\n");
+  const beforeText = operation.type === "insert"
+    ? ""
+    : originalLines.slice(operation.originalStartLine - 1, operation.originalEndLine).join("\n");
+  const afterText = operation.type === "delete" ? "" : operation.replacementText;
+
+  return {
+    beforeText: beforeText || "(nenhum texto)",
+    afterText: afterText || "(nenhum texto)"
+  };
+}
+
+function getActivityDiffPreview(activity: RoomActivityItem): AttemptDiffPreview | null {
+  const operation = activity.submittedServerDiff?.operations[0];
+
+  if (!activity.submittedOriginalCode || !operation) {
+    return null;
+  }
+
+  const originalLines = activity.submittedOriginalCode.split("\n");
   const beforeText = operation.type === "insert"
     ? ""
     : originalLines.slice(operation.originalStartLine - 1, operation.originalEndLine).join("\n");
@@ -1182,6 +1212,7 @@ function resetChallengeUiState(): void {
   selectedResolvedHistoryBugId.value = null;
   selectedResolvedBug.value = null;
   selectedAttempt.value = null;
+  selectedAdminActivity.value = null;
   highlightedBugId.value = null;
   challengeDisplayState.baseSource = "";
   challengeDisplayState.displayedSource = "";
@@ -1430,6 +1461,24 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
               <span class="metric-label">{{ activity.status }}</span>
             </div>
             <p class="muted-text">{{ activity.submittedAt }}</p>
+            <div v-if="getActivityDiffPreview(activity)" class="attempt-diff-preview" aria-label="Comparativo da submissao">
+              <div>
+                <span class="metric-label">Antes</span>
+                <pre><code>{{ getActivityDiffPreview(activity)?.beforeText }}</code></pre>
+              </div>
+              <div>
+                <span class="metric-label">Depois</span>
+                <pre><code>{{ getActivityDiffPreview(activity)?.afterText }}</code></pre>
+              </div>
+            </div>
+            <button
+              v-if="activity.submittedOriginalCode && activity.submittedCode"
+              class="secondary-button"
+              type="button"
+              @click="openAdminActivityPreview(activity)"
+            >
+              Abrir comparativo
+            </button>
             <details v-if="activity.submittedCode" class="admin-submission-code">
               <summary>Ver codigo enviado</summary>
               <pre><code>{{ activity.submittedCode }}</code></pre>
@@ -1754,6 +1803,20 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
       :preview-only="true"
       :attempt-status="selectedAttempt?.status"
       @close="closeAttemptPreview"
+    />
+
+    <SubmissionModal
+      :error-message="''"
+      :theme="editorTheme"
+      :open="selectedAdminActivity !== null"
+      :range-label="selectedAdminActivity?.submittedSelection ? formatAttemptRange(selectedAdminActivity.submittedSelection) : 'Trecho alterado'"
+      :submitting="false"
+      :value="selectedAdminActivity?.submittedCode ?? ''"
+      :original-text="selectedAdminActivity?.submittedOriginalCode"
+      :selected-range="selectedAdminActivity?.submittedSelection ?? null"
+      :preview-only="true"
+      :attempt-status="selectedAdminActivity?.status"
+      @close="closeAdminActivityPreview"
     />
 
     <teleport to="body">

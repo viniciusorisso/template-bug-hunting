@@ -590,10 +590,13 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
           status: enrichedResult.status,
           submittedBy: payload.participantName,
           submittedAt: new Date().toISOString(),
-          submittedCode: editorPayload?.file.editedText ?? submissionPayload.proposedFix
+          submittedCode: editorPayload?.file.editedText ?? submissionPayload.proposedFix,
+          submittedOriginalCode: editorPayload?.file.originalText,
+          submittedServerDiff: serverDiff,
+          submittedSelection: submissionPayload.selection
         });
 
-        const { submittedCode: _submittedCode, ...activitySummary } = activity;
+        const { submittedCode: _submittedCode, submittedOriginalCode: _submittedOriginalCode, submittedServerDiff: _submittedServerDiff, submittedSelection: _submittedSelection, ...activitySummary } = activity;
         broadcastRoomActivity(streamClients, {
           type: "room.activity",
           roomCode: normalizedRoomCode,

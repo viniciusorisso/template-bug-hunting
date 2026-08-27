@@ -1026,6 +1026,16 @@ test("POST /api/submissions calcula o diff no servidor para uma submissao pelo e
   assert.equal(secondPayload.serverDiff.operations.length, 1);
   assert.equal(secondPayload.serverDiff.operations[0].originalStartLine, 41);
   assert.equal(secondPayload.serverDiff.operations[0].replacementText.includes("couponCode?.trim()"), true);
+
+  const activityResponse = await fetch(`${baseUrl}/api/admin/rooms/${editorRoom.roomCode}/activity`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const activityPayload = await activityResponse.json();
+
+  assert.equal(activityResponse.status, 200);
+  assert.equal(activityPayload.items.at(-1).submittedOriginalCode, secondOriginalText);
+  assert.deepEqual(activityPayload.items.at(-1).submittedServerDiff, secondPayload.serverDiff);
+  assert.deepEqual(activityPayload.items.at(-1).submittedSelection, { startLine: 41, startColumn: 20, endLine: 41, endColumn: 61 });
 });
 
 test("POST /api/submissions rejeita submissao pelo editor com fonte desatualizada", async () => {
