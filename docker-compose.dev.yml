@@ -4,6 +4,8 @@ services:
     working_dir: /app
     command: >-
       bash -lc "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @ts-bug-hunt/api dev"
+    env_file:
+      - .env.local
     environment:
       PORT: 3001
       CHOKIDAR_USEPOLLING: "true"

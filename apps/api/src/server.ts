@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 import { runRuntimeSimulation, runTypecheck, validateExecutionSourceSize } from "./execution.js";
 import {
   appendAttempt,
+  calculateServerDiff,
+  hashSource,
   getChallengeById,
   InMemoryAdminStore,
   InMemoryRoomStore,
@@ -30,12 +32,14 @@ import {
   type RoomActivityEvent,
   type RoomActivityResponse,
   type RoomExecutionSettingsResponse,
+  type RoomExecutionSettingsEvent,
   type RoomRunRequest,
   type RoomRunResponse,
   type RoomStoreSnapshot,
   type RoomTypecheckRequest,
   type RoomTypecheckResponse,
   type SessionProgress,
+  type SubmitBugEditorRequest,
   type SubmitBugRequest,
   type UpdateRoomExecutionSettingsRequest
 } from "@ts-bug-hunt/core";
@@ -271,6 +275,12 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         challengeId: room.challengeId,
         executionSettings: normalizeRoomExecutionSettings(room.executionSettings)
       };
+
+      const roomSettingsEvent: RoomExecutionSettingsEvent = {
+        type: "room.execution-settings",
+        ...roomSettingsResponse
+      };
+      broadcastRoomExecutionSettings(streamClients, roomSettingsEvent);
 
       return sendJson(response, 200, roomSettingsResponse);
     }
@@ -519,21 +529,40 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
     }
 
     if (request.method === "POST" && request.url === "/api/submissions") {
-      const payload = await readJson<SubmitBugRequest>(request);
+      const payload = await readJson<SubmitBugRequest | SubmitBugEditorRequest>(request);
 
       if (!payload) {
         return sendJson(response, 400, { message: "Payload JSON invalido." });
       }
 
-      const error = validateRequest(payload, roomStore);
+      const editorPayload = isEditorSubmission(payload) ? payload : null;
+      const normalizedRoomCode = normalizeRoomCode(payload.roomCode);
+      const challengeForSubmission = getChallengeById(payload.challengeId?.trim() ?? "");
+      if (editorPayload) {
+        if (!editorPayload.file || typeof editorPayload.file.path !== "string" || typeof editorPayload.file.language !== "string" || typeof editorPayload.file.sourceVersion !== "string" || typeof editorPayload.file.originalText !== "string" || typeof editorPayload.file.editedText !== "string" || !editorPayload.clientChanges || typeof editorPayload.clientChanges !== "object" || !Array.isArray(editorPayload.clientChanges.operations)) {
+          return sendJson(response, 400, { message: "Payload de editor invalido." });
+        }
+        if (!challengeForSubmission) return sendJson(response, 404, { message: "Challenge nao encontrado." });
+        const canonical = buildChallengeStateResponse(
+          { challengeId: challengeForSubmission.id, roomCode: normalizedRoomCode },
+          challengeResolvedBugOrder
+        ).displayedSource;
+        if (!editorPayload.file.path.endsWith(".ts") || editorPayload.file.language !== "typescript" || editorPayload.file.originalText !== canonical || editorPayload.file.sourceVersion !== hashSource(canonical)) {
+          return sendJson(response, 409, { message: "A versao do arquivo esta desatualizada ou inconsistente.", conflict: true });
+        }
+        if (editorPayload.file.editedText === canonical) return sendJson(response, 400, { message: "Nenhuma alteracao foi realizada." });
+        if (editorPayload.file.editedText.length > 100_000) return sendJson(response, 413, { message: "Arquivo excede o limite permitido." });
+      }
+      const submissionPayload: SubmitBugRequest = editorPayload ? { ...editorPayload, proposedFix: editorPayload.file.editedText } as SubmitBugRequest : payload as SubmitBugRequest;
+      const error = validateRequest(submissionPayload, roomStore);
 
       if (error) {
         return sendJson(response, 400, { message: error });
       }
 
-      const normalizedRoomCode = normalizeRoomCode(payload.roomCode);
-      const currentProgress = store.getOrCreate(payload.sessionId, payload.challengeId);
-      const baseResult = validateSubmission(payload, currentProgress);
+      const currentProgress = store.getOrCreate(submissionPayload.sessionId, submissionPayload.challengeId);
+      const baseResult = validateSubmission(submissionPayload, currentProgress);
+      const serverDiff = editorPayload ? calculateServerDiff(editorPayload.file.originalText, editorPayload.file.editedText) : undefined;
       syncChallengeResolvedBugOrder(
         challengeResolvedBugOrder,
         { challengeId: payload.challengeId, roomCode: normalizedRoomCode },
@@ -546,9 +575,10 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
       );
       const enrichedResult = {
         ...baseResult,
-        resolvedBugDiff: baseResult.bugId ? challengeState.resolvedBugDiffs[baseResult.bugId] : undefined
+        resolvedBugDiff: baseResult.bugId ? challengeState.resolvedBugDiffs[baseResult.bugId] : undefined,
+        serverDiff
       };
-      const nextProgress = appendAttempt(currentProgress, payload, enrichedResult);
+      const nextProgress = appendAttempt(currentProgress, { ...submissionPayload, originalText: editorPayload?.file.originalText, editedText: editorPayload?.file.editedText, serverDiff }, enrichedResult);
       store.save(nextProgress);
 
       if (normalizedRoomCode && payload.participantName) {
@@ -558,20 +588,22 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
           bugId: enrichedResult.bugId,
           status: enrichedResult.status,
           submittedBy: payload.participantName,
-          submittedAt: new Date().toISOString()
+          submittedAt: new Date().toISOString(),
+          submittedCode: editorPayload?.file.editedText ?? submissionPayload.proposedFix
         });
 
+        const { submittedCode: _submittedCode, ...activitySummary } = activity;
         broadcastRoomActivity(streamClients, {
           type: "room.activity",
           roomCode: normalizedRoomCode,
-          item: activity
+          item: activitySummary
         });
       }
 
       persistState();
 
       if (enrichedResult.status === "solved") {
-        const event = buildResolvedBugEvent(payload, enrichedResult, challengeState);
+        const event = buildResolvedBugEvent(submissionPayload, enrichedResult, challengeState);
 
         if (event) {
           broadcastResolvedBug(streamClients, event, normalizedRoomCode);
@@ -638,6 +670,10 @@ function validateHintRequest(payload: RequestHintPayload | null, roomStore: InMe
   }
 
   return null;
+}
+
+function isEditorSubmission(payload: SubmitBugRequest | SubmitBugEditorRequest): payload is SubmitBugEditorRequest {
+  return typeof payload === "object" && payload !== null && ("file" in payload || "clientChanges" in payload);
 }
 
 function validateRequest(payload: SubmitBugRequest | null, roomStore: InMemoryRoomStore): string | null {
@@ -732,6 +768,18 @@ function broadcastResolvedBug(clients: Set<StreamClient>, event: ResolvedBugEven
 
 function broadcastRoomActivity(clients: Set<StreamClient>, event: RoomActivityEvent): void {
   const payload = `event: room.activity\ndata: ${JSON.stringify(event)}\n\n`;
+
+  for (const client of clients) {
+    if (client.roomCode && client.roomCode !== event.roomCode) {
+      continue;
+    }
+
+    client.response.write(payload);
+  }
+}
+
+function broadcastRoomExecutionSettings(clients: Set<StreamClient>, event: RoomExecutionSettingsEvent): void {
+  const payload = `event: room.execution-settings\ndata: ${JSON.stringify(event)}\n\n`;
 
   for (const client of clients) {
     if (client.roomCode && client.roomCode !== event.roomCode) {

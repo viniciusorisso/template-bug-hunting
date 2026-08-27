@@ -40,6 +40,7 @@ type RecordActivityInput = {
   status: SubmissionStatus;
   submittedBy: string;
   submittedAt: string;
+  submittedCode?: string;
 };
 
 export class InMemoryAdminStore {
@@ -180,7 +181,8 @@ export class InMemoryRoomStore {
       bugId: input.bugId,
       status: input.status,
       submittedBy: input.submittedBy,
-      submittedAt: input.submittedAt
+      submittedAt: input.submittedAt,
+      submittedCode: input.submittedCode
     };
 
     const current = this.activity.get(input.roomCode) ?? [];

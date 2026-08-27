@@ -35,8 +35,35 @@ export type SubmissionAttempt = {
   bugId?: string;
   selection: CodeRange;
   proposedFix: string;
+  originalText?: string;
+  editedText?: string;
+  serverDiff?: ServerDiff;
   status: SubmissionStatus;
   createdAt: string;
+};
+
+export type EditorChangeOperation = {
+  type: "replace" | "insert" | "delete";
+  originalStartLine: number;
+  originalEndLine: number;
+  replacementText: string;
+};
+
+export type ServerDiff = {
+  operations: EditorChangeOperation[];
+  addedLines: number;
+  removedLines: number;
+};
+
+export type SubmitBugEditorRequest = {
+  schemaVersion: 1;
+  challengeId: string;
+  sessionId: string;
+  roomCode?: string;
+  participantName?: string;
+  file: { path: string; language: "typescript"; sourceVersion: string; originalText: string; editedText: string };
+  selection: CodeRange;
+  clientChanges: { operations: EditorChangeOperation[]; clientDiff?: string };
 };
 
 export type SessionProgress = {
@@ -121,8 +148,11 @@ export type SubmitBugRequest = {
   sessionId: string;
   selection: CodeRange;
   proposedFix: string;
+  originalText?: string;
   roomCode?: string;
   participantName?: string;
+  editedText?: string;
+  serverDiff?: ServerDiff;
 };
 
 export type SubmitBugResponse = {
@@ -133,6 +163,8 @@ export type SubmitBugResponse = {
   technicalBasis?: string;
   resolvedBugIds: string[];
   resolvedBugDiff?: ResolvedBugDiff;
+  serverDiff?: ServerDiff;
+  conflict?: boolean;
 };
 
 export type RequestHintPayload = {
@@ -198,6 +230,7 @@ export type RoomActivityItem = {
   status: SubmissionStatus;
   submittedBy: string;
   submittedAt: string;
+  submittedCode?: string;
 };
 
 export type RoomActivityResponse = {
@@ -208,7 +241,14 @@ export type RoomActivityResponse = {
 export type RoomActivityEvent = {
   type: "room.activity";
   roomCode: string;
-  item: RoomActivityItem;
+  item: Omit<RoomActivityItem, "submittedCode">;
+};
+
+export type RoomExecutionSettingsEvent = {
+  type: "room.execution-settings";
+  roomCode: string;
+  challengeId: string;
+  executionSettings: Required<RoomExecutionSettings>;
 };
 
 export type AdminStatusResponse = {
