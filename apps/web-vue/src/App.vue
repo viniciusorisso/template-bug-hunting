@@ -1006,12 +1006,13 @@ function connectChallengeStream(): void {
       return;
     }
 
+    void refreshChallengeProjection();
+
     if (event.sessionId !== roomContext.value.sessionId) {
-      void refreshChallengeProjection();
       announceResolvedBug(event);
     }
   });
-  eventSource.onerror = closeEventSource;
+  eventSource.onerror = () => undefined;
 }
 
 function connectObserverStream(roomCode: string): void {
