@@ -12,9 +12,10 @@ import {
   InMemoryAdminStore,
   InMemoryRoomStore,
   InMemorySessionStore,
-  listChallenges,
+  listPublicChallenges,
   projectResolvedSource,
   selectNextHint,
+  toPublicChallenge,
   validateSubmission,
   type AdminAuthRequest,
   type AdminCredentials,
@@ -444,7 +445,7 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
     }
 
     if (request.method === "GET" && request.url === "/api/challenges") {
-      return sendJson(response, 200, listChallenges());
+      return sendJson(response, 200, listPublicChallenges());
     }
 
     if (request.method === "GET" && request.url?.startsWith("/api/challenges/")) {
@@ -455,7 +456,7 @@ export function createServer(options: CreateServerOptions = {}): http.Server {
         return sendJson(response, 404, { message: "Challenge nao encontrado." });
       }
 
-      return sendJson(response, 200, challenge);
+      return sendJson(response, 200, toPublicChallenge(challenge));
     }
 
     if (request.method === "GET" && request.url?.startsWith("/api/session-progress/")) {
@@ -1065,12 +1066,22 @@ function buildChallengeStateResponse(
 
   const resolvedBugOrder = getResolvedBugOrder(state, scope.challengeId, scope.roomCode);
   const projection = projectResolvedSource(challenge, resolvedBugOrder);
+  const resolvedBugTechnicalBases: Record<string, string> = {};
+
+  for (const bugId of resolvedBugOrder) {
+    const bug = challenge.bugs.find((candidate) => candidate.id === bugId);
+
+    if (bug) {
+      resolvedBugTechnicalBases[bugId] = bug.technicalBasis;
+    }
+  }
 
   return {
     challengeId: scope.challengeId,
     baseSource: challenge.source,
     resolvedBugOrder,
     resolvedBugDiffs: projection.resolvedBugDiffs,
+    resolvedBugTechnicalBases,
     displayedSource: projection.displayedSource
   };
 }
