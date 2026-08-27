@@ -117,6 +117,11 @@ class MockEditor {
     this.focusListeners.forEach((listener) => listener());
   });
   updateOptions = vi.fn();
+  trigger(_source: string, handler: string, payload?: { text?: string }): void {
+    if (handler === "type" && payload?.text) {
+      this.model.setValue(this.model.getValue() + payload.text);
+    }
+  }
   private selectionListeners: Array<Listener<{ selection: MockSelection }>> = [];
   private mouseMoveListeners: Array<Listener<{ target: { position: { lineNumber: number; column: number } | null } }>> = [];
   private mouseLeaveListeners: Array<Listener<void>> = [];
@@ -313,6 +318,15 @@ const mockMonaco = {
     },
     createModel(value: string) {
       return new MockModel(value);
+    },
+    createDiffEditor(host: HTMLElement) {
+      const root = document.createElement("div");
+      root.className = "monaco-diff-editor";
+      host.append(root);
+      return {
+        setModel: vi.fn(),
+        dispose: vi.fn(() => root.remove())
+      };
     },
     defineTheme,
     setTheme

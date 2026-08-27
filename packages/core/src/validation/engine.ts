@@ -142,6 +142,9 @@ export function appendAttempt(
     bugId: response.bugId,
     selection: normalizeRange(request.selection),
     proposedFix: request.proposedFix,
+    originalText: request.originalText,
+    editedText: request.editedText,
+    serverDiff: request.serverDiff,
     status: response.status,
     createdAt: new Date().toISOString()
   };

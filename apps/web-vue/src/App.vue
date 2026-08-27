@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { hashSource } from "@ts-bug-hunt/core";
 import type {
   AdminAuthResponse,
   AdminStatusResponse,
@@ -14,10 +15,12 @@ import type {
   RoomActivityItem,
   RoomActivityResponse,
   RoomExecutionSettings,
+  RoomExecutionSettingsEvent,
   RoomRunResponse,
   RoomSummary,
   RoomTypecheckResponse,
   SessionProgress,
+  SubmissionAttempt,
   SubmitBugResponse
 } from "@ts-bug-hunt/core";
 import CodeViewer from "./components/CodeViewer.vue";
@@ -88,15 +91,18 @@ const modalOpen = ref(false);
 const notification = ref<NotificationBanner | null>(null);
 const activeBalloons = ref<CelebrationBalloonState[]>([]);
 const selectedResolvedBug = ref<CelebrationBalloonState | null>(null);
+const selectedAttempt = ref<SubmissionAttempt | null>(null);
 const highlightedBugId = ref<string | null>(null);
 const latestResolvedBug = ref<ResolvedBugEvent | null>(null);
 const resolvedBugHistory = ref<ResolvedBugEvent[]>([]);
 const selectedResolvedHistoryBugId = ref<string | null>(null);
 const editorTheme = ref<EditorThemeId>(readStoredEditorTheme());
+const editorExpanded = ref(false);
 
 const form = reactive({
   proposedFix: ""
 });
+
 
 const adminState = reactive({
   loading: false,
@@ -266,6 +272,10 @@ function handleEditorThemeChange(event: Event): void {
   window.localStorage.setItem(editorThemeStorageKey, editorTheme.value);
 }
 
+function toggleEditorExpanded(): void {
+  editorExpanded.value = !editorExpanded.value;
+}
+
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") {
     return;
@@ -278,6 +288,11 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
   if (modalOpen.value) {
     closeSubmissionModal();
+    return;
+  }
+
+  if (editorExpanded.value) {
+    editorExpanded.value = false;
     return;
   }
 
@@ -377,13 +392,27 @@ function openSubmissionModal(): void {
   }
 
   submissionError.value = "";
-  form.proposedFix = selectedText.value;
+  form.proposedFix = displayedSource.value;
   modalOpen.value = true;
 }
 
 function closeSubmissionModal(): void {
   modalOpen.value = false;
   submissionError.value = "";
+}
+
+function canPreviewAttempt(attempt: SubmissionAttempt): boolean {
+  return Boolean(attempt.originalText && attempt.editedText);
+}
+
+function openAttemptPreview(attempt: SubmissionAttempt): void {
+  if (canPreviewAttempt(attempt)) {
+    selectedAttempt.value = attempt;
+  }
+}
+
+function closeAttemptPreview(): void {
+  selectedAttempt.value = null;
 }
 
 function dismissBalloon(balloonId: string): void {
@@ -453,6 +482,7 @@ async function openResolvedBugModal(balloonId: string): Promise<void> {
 function closeResolvedBugModal(): void {
   const balloonId = selectedResolvedBug.value?.id;
   selectedResolvedBug.value = null;
+  selectedAttempt.value = null;
 
   if (balloonId && activeBalloons.value.some((balloon) => balloon.id === balloonId)) {
     scheduleBalloonDismiss(balloonId);
@@ -564,6 +594,7 @@ async function submit(): Promise<void> {
 
   submitting.value = true;
   submissionError.value = "";
+  const sourceBeforeSubmission = displayedSource.value;
 
   try {
     feedback.value = await requestJson<SubmitBugResponse>("/api/submissions", {
@@ -575,6 +606,15 @@ async function submit(): Promise<void> {
         challengeId: challenge.value.id,
         sessionId: roomContext.value.sessionId,
         selection: selectedRange.value,
+        schemaVersion: 1,
+        file: {
+          path: challenge.value.id + ".ts",
+          language: "typescript",
+          sourceVersion: hashSource(sourceBeforeSubmission),
+          originalText: sourceBeforeSubmission,
+          editedText: form.proposedFix
+        },
+        clientChanges: { operations: [] },
         proposedFix: form.proposedFix,
         roomCode: roomContext.value.roomCode || undefined,
         participantName: roomContext.value.participantName || undefined
@@ -584,7 +624,6 @@ async function submit(): Promise<void> {
 
     if (feedback.value.status === "solved") {
       await refreshChallengeProjection();
-      clearSelection();
 
       const resolvedEvent = buildResolvedBugEvent(feedback.value);
 
@@ -595,6 +634,7 @@ async function submit(): Promise<void> {
 
     modalOpen.value = false;
     form.proposedFix = "";
+    clearSelection();
   } catch (error) {
     submissionError.value = getErrorMessage(error, "Nao foi possivel enviar a submissao.");
   } finally {
@@ -612,6 +652,30 @@ async function fetchSessionProgress(): Promise<SessionProgress> {
 
 function formatAttemptRange(selection: CodeRange): string {
   return `L${selection.startLine}:C${selection.startColumn} - L${selection.endLine}:C${selection.endColumn}`;
+}
+
+type AttemptDiffPreview = {
+  beforeText: string;
+  afterText: string;
+};
+
+function getAttemptDiffPreview(attempt: SessionProgress["attempts"][number]): AttemptDiffPreview | null {
+  const operation = attempt.serverDiff?.operations[0];
+
+  if (!attempt.originalText || !attempt.editedText || !operation) {
+    return null;
+  }
+
+  const originalLines = attempt.originalText.split("\n");
+  const beforeText = operation.type === "insert"
+    ? ""
+    : originalLines.slice(operation.originalStartLine - 1, operation.originalEndLine).join("\n");
+  const afterText = operation.type === "delete" ? "" : operation.replacementText;
+
+  return {
+    beforeText: beforeText || "(nenhum texto)",
+    afterText: afterText || "(nenhum texto)"
+  };
 }
 
 function formatDifficultyLabel(difficulty: string): string {
@@ -995,6 +1059,16 @@ function connectChallengeStream(): void {
     eventSource = new EventSource(`${apiBaseUrl}/api/events?${params.toString()}`);
   }
 
+  eventSource.addEventListener("room.execution-settings", (message) => {
+    const event = parseMessage<RoomExecutionSettingsEvent>((message as MessageEvent<string>).data);
+
+    if (!event || event.type !== "room.execution-settings" || event.roomCode !== roomContext.value.roomCode || event.challengeId !== currentChallengeId.value) {
+      return;
+    }
+
+    updateCurrentRoomExecutionSettings(event.executionSettings);
+  });
+
   eventSource.addEventListener("bug.resolved", (message) => {
     const event = parseMessage<ResolvedBugEvent>((message as MessageEvent<string>).data);
 
@@ -1012,6 +1086,16 @@ function connectChallengeStream(): void {
     }
   });
   eventSource.onerror = closeEventSource;
+}
+
+function updateCurrentRoomExecutionSettings(settings: Required<RoomExecutionSettings>): void {
+  const params = new URLSearchParams(route.value.search);
+  params.set("allowTypecheck", settings.allowTypecheck ? "1" : "0");
+  params.set("allowRuntimeExecution", settings.allowRuntimeExecution ? "1" : "0");
+  const search = `?${params.toString()}`;
+
+  window.history.replaceState({}, "", `${window.location.pathname}${search}`);
+  route.value = { ...route.value, search };
 }
 
 function connectObserverStream(roomCode: string): void {
@@ -1097,6 +1181,7 @@ function resetChallengeUiState(): void {
   resolvedBugHistory.value = [];
   selectedResolvedHistoryBugId.value = null;
   selectedResolvedBug.value = null;
+  selectedAttempt.value = null;
   highlightedBugId.value = null;
   challengeDisplayState.baseSource = "";
   challengeDisplayState.displayedSource = "";
@@ -1345,7 +1430,11 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
               <span class="metric-label">{{ activity.status }}</span>
             </div>
             <p class="muted-text">{{ activity.submittedAt }}</p>
-            <p class="muted-text">Resposta protegida para evitar vazamento.</p>
+            <details v-if="activity.submittedCode" class="admin-submission-code">
+              <summary>Ver codigo enviado</summary>
+              <pre><code>{{ activity.submittedCode }}</code></pre>
+            </details>
+            <p v-else class="muted-text">Nenhum codigo foi registrado nesta submissao.</p>
             <p v-if="activity.bugId" class="muted-text">Bug: {{ activity.bugId }}</p>
           </li>
         </ul>
@@ -1412,7 +1501,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
       </section>
 
       <template v-else-if="challenge">
-        <div class="layout">
+        <div class="layout" :class="{ 'layout-editor-expanded': editorExpanded }">
           <section class="panel editor-panel">
             <div class="editor-toolbar">
               <div class="selection-summary">
@@ -1429,6 +1518,15 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
                   </select>
                 </label>
                 <button
+                  class="secondary-button toolbar-button"
+                  type="button"
+                  :aria-pressed="editorExpanded"
+                  :aria-label="editorExpanded ? 'Voltar ao tamanho normal do editor' : 'Expandir editor'"
+                  @click="toggleEditorExpanded"
+                >
+                  {{ editorExpanded ? 'Voltar ao normal' : 'Expandir editor' }}
+                </button>
+                <button
                   :disabled="!selectedRange"
                   class="secondary-button toolbar-button"
                   type="button"
@@ -1436,7 +1534,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
                 >
                   Limpar selecao
                 </button>
-                <button :disabled="!selectedRange" class="toolbar-button" type="button" @click="openSubmissionModal">
+                <button :disabled="!selectedRange" aria-label="Reportar bug" class="toolbar-button" type="button" @click="openSubmissionModal">
                   Reportar bug
                 </button>
               </div>
@@ -1453,7 +1551,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
             />
           </section>
 
-          <section class="sidebar">
+          <section v-show="!editorExpanded" class="sidebar">
             <section class="panel status-panel">
               <h2>Estado da sessao</h2>
               <div class="session-stats">
@@ -1597,12 +1695,30 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
               <h2>Tentativas recentes</h2>
               <p v-if="recentAttempts.length === 0" class="muted-text">Nenhuma tentativa registrada ainda.</p>
               <ul v-else class="list-panel">
-                <li v-for="attempt in recentAttempts" :key="attempt.createdAt" class="list-item">
-                  <div class="attempt-head">
-                    <strong>{{ attempt.status }}</strong>
-                    <span class="metric-label">{{ formatAttemptRange(attempt.selection) }}</span>
-                  </div>
-                  <span class="attempt-text">{{ attempt.proposedFix }}</span>
+                <li v-for="attempt in recentAttempts" :key="attempt.createdAt" class="attempt-history-item">
+                  <button
+                    class="attempt-preview-button"
+                    type="button"
+                    :disabled="!canPreviewAttempt(attempt)"
+                    :aria-label="`Visualizar tentativa ${attempt.status}`"
+                    @click="openAttemptPreview(attempt)"
+                  >
+                    <div class="attempt-head">
+                      <strong>{{ attempt.status }}</strong>
+                      <span class="metric-label">{{ formatAttemptRange(attempt.selection) }}</span>
+                    </div>
+                    <div v-if="getAttemptDiffPreview(attempt)" class="attempt-diff-preview">
+                      <div>
+                        <span class="metric-label">Antes</span>
+                        <pre><code>{{ getAttemptDiffPreview(attempt)?.beforeText }}</code></pre>
+                      </div>
+                      <div>
+                        <span class="metric-label">Depois</span>
+                        <pre><code>{{ getAttemptDiffPreview(attempt)?.afterText }}</code></pre>
+                      </div>
+                    </div>
+                    <span v-else class="attempt-text">{{ attempt.proposedFix }}</span>
+                  </button>
                 </li>
               </ul>
             </section>
@@ -1618,9 +1734,26 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
       :range-label="selectedRangeLabel"
       :submitting="submitting"
       :value="form.proposedFix"
+      :original-text="challenge?.source"
+      :file-path="challenge ? challenge.id + '.ts' : undefined"
+      :selected-range="selectedRange"
       @close="closeSubmissionModal"
       @submit="submit"
       @update:value="form.proposedFix = $event"
+    />
+
+    <SubmissionModal
+      :error-message="''"
+      :theme="editorTheme"
+      :open="selectedAttempt !== null"
+      :range-label="selectedAttempt ? formatAttemptRange(selectedAttempt.selection) : ''"
+      :submitting="false"
+      :value="selectedAttempt?.editedText ?? ''"
+      :original-text="selectedAttempt?.originalText"
+      :selected-range="selectedAttempt?.selection ?? null"
+      :preview-only="true"
+      :attempt-status="selectedAttempt?.status"
+      @close="closeAttemptPreview"
     />
 
     <teleport to="body">

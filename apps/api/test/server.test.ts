@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { hashSource } from "@ts-bug-hunt/core";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { IncomingMessage } from "node:http";
@@ -591,6 +592,7 @@ test("POST /api/submissions registra atividade de sala sem expor a resposta lite
   assert.equal(activityPayload.items[0].submittedBy, "Risso");
   assert.equal(activityPayload.items[0].bugId, "B002");
   assert.equal("proposedFix" in activityPayload.items[0], false);
+  assert.equal(activityPayload.items[0].submittedCode, "Trocar <= por < porque existe um off-by-one no loop.");
 });
 
 test("GET /api/admin/rooms/:roomCode/activity exige autenticacao admin", async () => {
@@ -916,6 +918,138 @@ test("createServer reidrata estado persistido depois de reiniciar a API", async 
   const activityPayload = await activityResponse.json();
   assert.equal(activityPayload.items.length, 1);
   assert.equal(activityPayload.items[0].submittedBy, "Persist User");
+});
+
+test("POST /api/submissions calcula o diff no servidor para uma submissao pelo editor", async () => {
+  const roomResponse = await fetch(`${baseUrl}/api/admin/rooms`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Turma do editor", password: "room-secret", challengeId: "checkout-ts-bug-hunt" })
+  });
+  const editorRoom = await roomResponse.json();
+  assert.equal(roomResponse.status, 201);
+
+  const challengeResponse = await fetch(`${baseUrl}/api/challenges/checkout-ts-bug-hunt`);
+  const challenge = await challengeResponse.json();
+  const editedText = challenge.source.replace("i <= input.items.length", "i < input.items.length");
+
+  const response = await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      challengeId: challenge.id,
+      sessionId: "editor-diff-session",
+      roomCode: editorRoom.roomCode,
+      participantName: "Editor Test",
+      selection: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
+      file: {
+        path: `${challenge.id}.ts`,
+        language: "typescript",
+        sourceVersion: hashSource(challenge.source),
+        originalText: challenge.source,
+        editedText
+      },
+      clientChanges: { operations: [] }
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.status, "solved");
+  assert.equal(payload.serverDiff.operations[0].type, "replace");
+  assert.equal(payload.serverDiff.operations[0].originalStartLine, 35);
+  assert.equal(payload.serverDiff.operations[0].replacementText, "  for (let i = 0; i < input.items.length; i++) {");
+  assert.equal(payload.serverDiff.addedLines, 1);
+  assert.equal(payload.serverDiff.removedLines, 1);
+  const progressResponse = await fetch(`${baseUrl}/api/session-progress/editor-diff-session/${challenge.id}`);
+  const progressPayload = await progressResponse.json();
+  assert.equal(progressPayload.attempts[0].originalText, challenge.source);
+  assert.equal(progressPayload.attempts[0].editedText, editedText);
+  assert.deepEqual(progressPayload.attempts[0].serverDiff, payload.serverDiff);
+
+  const stateResponse = await fetch(`${baseUrl}/api/challenge-state/${challenge.id}?roomCode=${editorRoom.roomCode}`);
+  const state = await stateResponse.json();
+  const secondOriginalText = state.displayedSource;
+  const secondEditedText = secondOriginalText.replace(
+    "candidate.code === input.couponCode!.toUpperCase()",
+    "candidate.code.trim().toUpperCase() === input.couponCode?.trim().toUpperCase()"
+  );
+  const secondResponse = await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      challengeId: challenge.id,
+      sessionId: "editor-diff-session",
+      roomCode: editorRoom.roomCode,
+      participantName: "Editor Test",
+      selection: { startLine: 41, startColumn: 20, endLine: 41, endColumn: 61 },
+      file: {
+        path: `${challenge.id}.ts`,
+        language: "typescript",
+        sourceVersion: hashSource(secondOriginalText),
+        originalText: secondOriginalText,
+        editedText: secondEditedText
+      },
+      clientChanges: { operations: [] }
+    })
+  });
+  const secondPayload = await secondResponse.json();
+
+  assert.equal(stateResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.equal(secondPayload.status, "solved");
+  assert.equal(secondPayload.serverDiff.operations.length, 1);
+  assert.equal(secondPayload.serverDiff.operations[0].originalStartLine, 41);
+  assert.equal(secondPayload.serverDiff.operations[0].replacementText.includes("couponCode?.trim()"), true);
+});
+
+test("POST /api/submissions rejeita submissao pelo editor com fonte desatualizada", async () => {
+  const challengeResponse = await fetch(`${baseUrl}/api/challenges/checkout-ts-bug-hunt`);
+  const challenge = await challengeResponse.json();
+
+  const response = await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      challengeId: challenge.id,
+      sessionId: "stale-editor-session",
+      selection: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
+      file: {
+        path: `${challenge.id}.ts`,
+        language: "typescript",
+        sourceVersion: "stale000",
+        originalText: challenge.source,
+        editedText: challenge.source.replace("i <= input.items.length", "i < input.items.length")
+      },
+      clientChanges: { operations: [] }
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.equal(payload.conflict, true);
+});
+
+test("POST /api/submissions rejeita payload de editor malformado sem erro interno", async () => {
+  const response = await fetch(`${baseUrl}/api/submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      challengeId: "checkout-ts-bug-hunt",
+      sessionId: "invalid-editor-session",
+      selection: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
+      proposedFix: "i < input.items.length",
+      file: null,
+      clientChanges: { operations: [] }
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.message, "Payload de editor invalido.");
 });
 
 function openEventStream(pathname: string): {

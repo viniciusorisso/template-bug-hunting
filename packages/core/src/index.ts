@@ -7,3 +7,4 @@ export * from "./session/rooms.js";
 export * from "./projection/resolved.js";
 export * from "./notifications/index.js";
 export * from "./hints.js";
+export * from "./editor-diff.js";

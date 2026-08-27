@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --experimental-strip-types src/server.ts",
+    "dev": "node --watch --env-file=../../.env.local --experimental-strip-types src/server.ts",
     "build": "pnpm --filter @ts-bug-hunt/core build && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test --experimental-strip-types test/**/*.test.ts"

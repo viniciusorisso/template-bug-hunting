@@ -1,5 +1,7 @@
 node_modules
 dist
+.env
+.env.*
 .turbo
 coverage
 .DS_Store

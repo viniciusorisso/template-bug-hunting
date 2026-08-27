@@ -160,6 +160,51 @@ describe("App", () => {
     expect(wrapper.get('.code-viewer').attributes('data-editor-theme')).toBe('classic-dark');
   });
 
+
+  it("expands the editor into the sidebar space and restores the normal layout", async () => {
+    vi.stubGlobal("EventSource", createEventSourceStub());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith("/api/challenges")) {
+          return createJsonResponse([challenge]);
+        }
+
+        if (input.endsWith(`/api/challenges/${challenge.id}`)) {
+          return createJsonResponse(challenge);
+        }
+
+        if (input.includes(challengeStatePath)) {
+          return createJsonResponse(emptyChallengeState);
+        }
+
+        if (input.endsWith(`/api/session-progress/session-1/${challenge.id}`)) {
+          return createJsonResponse(initialProgress);
+        }
+
+        throw new Error(`Unhandled request: ${input}`);
+      })
+    );
+    window.localStorage.setItem("ts-bug-hunt.session-id", "session-1");
+
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+
+    const toggle = wrapper.get('button[aria-label="Expandir editor"]');
+    await toggle.trigger("click");
+
+    expect(wrapper.get(".layout").classes()).toContain("layout-editor-expanded");
+    expect(wrapper.get(".sidebar").isVisible()).toBe(false);
+    expect(toggle.text()).toBe("Voltar ao normal");
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+
+    await toggle.trigger("click");
+
+    expect(wrapper.get(".layout").classes()).not.toContain("layout-editor-expanded");
+    expect(wrapper.get(".sidebar").isVisible()).toBe(true);
+    expect(toggle.text()).toBe("Expandir editor");
+    expect(toggle.attributes("aria-pressed")).toBe("false");
+  });
   it("loads the challenge, challenge-state and session progress", async () => {
     vi.stubGlobal("EventSource", createEventSourceStub());
     vi.stubGlobal(
@@ -264,7 +309,7 @@ describe("App", () => {
       range: { startLine: 35, startColumn: 20, endLine: 35, endColumn: 46 },
       text: "for (let i = 0; i <= input.items.length; i++)"
     });
-    await wrapper.findAll("button.toolbar-button")[1]!.trigger("click");
+    await wrapper.get('button[aria-label="Reportar bug"]').trigger("click");
     await flushPromises();
 
     getLastMockEditor().triggerContent("Trocar <= por < porque existe um off-by-one no loop.");
@@ -273,11 +318,15 @@ describe("App", () => {
     const modalButtons = document.body.querySelectorAll(".modal-actions button");
     (modalButtons[1] as HTMLButtonElement | undefined)?.click();
     await flushPromises();
+    const reviewButtons = document.body.querySelectorAll(".modal-actions button");
+    (reviewButtons[2] as HTMLButtonElement | undefined)?.click();
+    await flushPromises();
 
     expect(wrapper.text()).toContain("Bug resolvido: B002");
     expect(wrapper.find(".code-viewer .monaco-editor").text()).toContain("i < input.items.length");
     expect(getMockEditors()[0]?.decorations.set.mock.calls.at(-1)?.[0]?.length).toBeGreaterThan(0);
     expect(wrapper.text()).toContain("1/10");
+    expect(wrapper.get('button[aria-label="Reportar bug"]').attributes("disabled")).toBeDefined();
     expect(document.body.textContent).toContain("Bug resolvidoB002");
     expect(wrapper.text()).toContain("Historico de resolucoes");
     expect(wrapper.text()).toContain("i <= input.items.length");
@@ -643,7 +692,8 @@ describe("App", () => {
   });
 
   it("runs typecheck and runtime when the room allows execution", async () => {
-    vi.stubGlobal("EventSource", createEventSourceStub());
+    const EventSourceStub = createEventSourceStub();
+    vi.stubGlobal("EventSource", EventSourceStub);
     window.history.pushState(
       {},
       "",
@@ -721,6 +771,30 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Runtime:");
     expect(wrapper.text()).toContain("user@example.com");
     expect(wrapper.text()).toContain('"primaryRole":"viewer"');
+
+    EventSourceStub.instances[0]?.emit({
+      type: "room.execution-settings",
+      roomCode: "ROOM01",
+      challengeId: challenge.id,
+      executionSettings: { allowTypecheck: false, allowRuntimeExecution: false }
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("tsc: bloqueado | runtime: bloqueado");
+    expect(wrapper.findAll("button").find((candidate) => candidate.text() === "Rodar tsc")?.attributes("disabled")).toBeDefined();
+    expect(wrapper.findAll("button").find((candidate) => candidate.text() === "Executar codigo")?.attributes("disabled")).toBeDefined();
+
+    EventSourceStub.instances[0]?.emit({
+      type: "room.execution-settings",
+      roomCode: "ROOM01",
+      challengeId: challenge.id,
+      executionSettings: { allowTypecheck: true, allowRuntimeExecution: true }
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("tsc: liberado | runtime: liberado");
+    expect(wrapper.findAll("button").find((candidate) => candidate.text() === "Rodar tsc")?.attributes("disabled")).toBeUndefined();
+    expect(wrapper.findAll("button").find((candidate) => candidate.text() === "Executar codigo")?.attributes("disabled")).toBeUndefined();
   });
 
   it("authenticates admin and lists created rooms", async () => {
@@ -983,7 +1057,8 @@ describe("App", () => {
         bugId: "B002",
         status: "solved",
         submittedBy: "Risso",
-        submittedAt: "2026-08-18T00:00:00.000Z"
+        submittedAt: "2026-08-18T00:00:00.000Z",
+        submittedCode: "for (let i = 0; i < input.items.length; i++)"
       }
     ];
 
@@ -1025,7 +1100,8 @@ describe("App", () => {
     expect(wrapper.text()).toContain("Sala ROOM01");
     expect(wrapper.text()).toContain("Risso");
     expect(wrapper.text()).toContain("Ana");
-    expect(wrapper.text()).toContain("Resposta protegida para evitar vazamento.");
+    expect(wrapper.text()).toContain("Ver codigo enviado");
+    expect(wrapper.text()).toContain("for (let i = 0; i < input.items.length; i++)");
     expect(wrapper.text()).not.toContain("Trocar <= por <.");
   });
 });
