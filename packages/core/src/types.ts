@@ -122,11 +122,24 @@ export type ChallengeDefinition = {
   bugs: BugDefinition[];
 };
 
+/**
+ * Dados de um bug que podem ser enviados ao jogador antes da resolucao.
+ * Os detalhes usados para validar ou aplicar a correcao permanecem privados
+ * no catalogo do servidor.
+ */
+export type PublicBugDefinition = Pick<BugDefinition, "id" | "title" | "category" | "difficulty">;
+
+/** Contrato seguro do challenge consumido pelo cliente. */
+export type PublicChallengeDefinition = Omit<ChallengeDefinition, "bugs"> & {
+  bugs: PublicBugDefinition[];
+};
+
 export type ChallengeStateResponse = {
   challengeId: string;
   baseSource: string;
   resolvedBugOrder: string[];
   resolvedBugDiffs: Record<string, ResolvedBugDiff>;
+  resolvedBugTechnicalBases?: Record<string, string>;
   displayedSource: string;
 };
 

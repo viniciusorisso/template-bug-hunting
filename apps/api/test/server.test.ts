@@ -402,6 +402,28 @@ test("POST /api/submissions registra bug resolvido e progresso fica disponivel",
   assert.equal(progressPayload.attempts.length, 1);
 });
 
+test("GET /api/challenges nao expoe respostas ou regras privadas dos bugs", async () => {
+  const listResponse = await fetch(`${baseUrl}/api/challenges`);
+  const listPayload = await listResponse.json();
+  const detailResponse = await fetch(`${baseUrl}/api/challenges/checkout-ts-bug-hunt`);
+  const detailPayload = await detailResponse.json();
+
+  assert.equal(listResponse.status, 200);
+  assert.equal(detailResponse.status, 200);
+
+  for (const challenge of [...listPayload, detailPayload]) {
+    for (const bug of challenge.bugs) {
+      assert.deepEqual(Object.keys(bug).sort(), ["category", "difficulty", "id", "title"]);
+    }
+
+    assert.equal(JSON.stringify(challenge).includes("expectedFix"), false);
+    assert.equal(JSON.stringify(challenge).includes("technicalBasis"), false);
+    assert.equal(JSON.stringify(challenge).includes("expectedRange"), false);
+    assert.equal(JSON.stringify(challenge).includes("replacement"), false);
+    assert.equal(JSON.stringify(challenge).includes("testId"), false);
+  }
+});
+
 test("GET /api/challenge-state/:challengeId retorna source derivado e diffs resolvidos", async () => {
   await fetch(`${baseUrl}/api/submissions`, {
     method: "POST",
@@ -422,6 +444,7 @@ test("GET /api/challenge-state/:challengeId retorna source derivado e diffs reso
   assert.equal(response.status, 200);
   assert.deepEqual(payload.resolvedBugOrder, ["B002"]);
   assert.equal(payload.resolvedBugDiffs.B002.bugId, "B002");
+  assert.equal(payload.resolvedBugTechnicalBases.B002, "Array vai de 0 ate length - 1.");
   assert.match(payload.displayedSource, /i < input\.items\.length/);
 });
 

@@ -4,7 +4,7 @@ import { hashSource } from "@ts-bug-hunt/core";
 import type {
   AdminAuthResponse,
   AdminStatusResponse,
-  ChallengeDefinition,
+  PublicChallengeDefinition,
   ChallengeStateResponse,
   CodeRange,
   JoinRoomResponse,
@@ -69,9 +69,9 @@ const editorThemes: Array<{ id: EditorThemeId; label: string }> = [
 ];
 
 const route = ref<RouteState>(readRoute());
-const availableChallenges = ref<ChallengeDefinition[]>([]);
+const availableChallenges = ref<PublicChallengeDefinition[]>([]);
 
-const challenge = ref<ChallengeDefinition | null>(null);
+const challenge = ref<PublicChallengeDefinition | null>(null);
 const loading = ref(true);
 const submitting = ref(false);
 const loadError = ref("");
@@ -704,8 +704,8 @@ async function loadChallengeState(): Promise<void> {
 
   try {
     const [challengeList, challengeResponse, progressResponse, challengeStateResponse] = await Promise.all([
-      requestJson<ChallengeDefinition[]>("/api/challenges"),
-      requestJson<ChallengeDefinition>(`/api/challenges/${currentChallengeId.value}`),
+      requestJson<PublicChallengeDefinition[]>("/api/challenges"),
+      requestJson<PublicChallengeDefinition>(`/api/challenges/${currentChallengeId.value}`),
       fetchSessionProgress(),
       requestJson<ChallengeStateResponse>(getChallengeStatePath(currentChallengeId.value))
     ]);
@@ -744,7 +744,7 @@ function applyChallengeState(challengeStateResponse: ChallengeStateResponse): vo
 }
 
 async function loadChallengeCatalog(): Promise<void> {
-  availableChallenges.value = await requestJson<ChallengeDefinition[]>("/api/challenges");
+  availableChallenges.value = await requestJson<PublicChallengeDefinition[]>("/api/challenges");
 
   if (!adminState.challengeId && availableChallenges.value[0]) {
     adminState.challengeId = availableChallenges.value[0].id;
@@ -1227,7 +1227,7 @@ function syncResolvedBugHistoryFromState(challengeStateResponse: ChallengeStateR
         title: bug.title,
         resolvedAt: "",
         diff,
-        shortDescription: bug.technicalBasis
+        shortDescription: challengeStateResponse.resolvedBugTechnicalBases?.[bugId] ?? ""
       }];
     });
 
@@ -1258,7 +1258,7 @@ function buildResolvedBugEvent(result: SubmitBugResponse): ResolvedBugEvent | nu
     title: bug.title,
     resolvedAt: new Date().toISOString(),
     diff: result.resolvedBugDiff,
-    shortDescription: bug.technicalBasis
+    shortDescription: result.technicalBasis ?? ""
   };
 }
 </script>
